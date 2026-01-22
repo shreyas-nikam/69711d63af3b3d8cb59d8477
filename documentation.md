@@ -3,384 +3,621 @@ summary: Lab 5: Interpretability & Explainability Control Workbench Documentatio
 feedback link: https://docs.google.com/forms/d/e/1FAIpQLSfWkOK-in_bMMoHSZfcIvAeO58PAH9wrDqcxnJABHaxiDqhSA/viewform?usp=sf_link
 environments: Web
 status: Published
-# QuLab: Interpretability & Explainability Control Workbench Codelab
+# QuLab: Lab 5: Interpretable AI for Model Validation with Streamlit
 
-## 1. Introduction: The Imperative of Explainable AI in Finance
-Duration: 05:00
+## 1. Introduction to Model Validation and Explainable AI (XAI)
+Duration: 0:05
 
-<aside class="positive">
-  This initial step provides crucial context. Understanding the <b>"why"</b> behind explainable AI, especially in regulated industries like finance, will help you grasp the value and purpose of each feature in this application.
-</aside>
-
-In the rapidly evolving landscape of artificial intelligence, particularly in sensitive sectors like banking and finance, the ability to **understand**, **interpret**, and **explain** model decisions is no longer a luxury—it's a regulatory, ethical, and business imperative. This Streamlit application, "QuLab: Lab 5: Interpretability & Explainability Control Workbench," is designed to empower model validators, like **Anya Sharma** at PrimeCredit Bank, to rigorously assess the transparency, fairness, and compliance of machine learning models.
-
-The primary focus of this codelab and the application itself is the **Credit Approval Model (CAM v1.2)**. Before such a model can be deployed to make critical decisions (like approving or denying loans), it must undergo thorough validation. This involves answering questions like:
-*   Why was a specific loan applicant approved or denied?
-*   Which factors generally drive the model's decisions?
-*   What minimal changes would have altered a denied application to an approved one?
-*   Can these explanations be consistently reproduced and audited?
-
-This application serves as a comprehensive workbench to generate, analyze, and document these crucial explanations, transforming complex ML model outputs into **audit-ready artifacts**.
-
-**Key Concepts Explained:**
-*   **Model Interpretability:** The degree to which a human can understand the cause of a decision.
-*   **Model Explainability:** The ability to explain a model's prediction in human-understandable terms.
-*   **Global Explanations:** Understanding the overall behavior and most important features of a model.
-*   **Local Explanations:** Explaining individual predictions for specific data instances.
-*   **Counterfactual Explanations:** Identifying minimal changes to an input that would flip a model's prediction.
-*   **Audit Trail & Reproducibility:** Ensuring that all analyses and explanations can be traced, verified, and reproduced.
-
-By the end of this codelab, you will have a deep understanding of how this Streamlit application facilitates the model validation process using state-of-the-art explainability techniques, and how it addresses the critical need for transparency and trust in AI systems.
-
-## 2. Setting the Stage: Environment Setup and Data Ingestion
-Duration: 10:00
-
-The first step in any robust model validation process is to securely load the model and the data it was trained on. This application emphasizes **reproducibility** and **traceability**, crucial aspects for financial audits. This is achieved by fixing a random seed and computing **SHA-256 hashes** for both the model and the dataset.
+Welcome to QuLab's Lab 5, focusing on Interpretability and Explainability Control. In today's highly regulated industries, particularly finance, simply having a high-performing machine learning model is no longer enough. Regulatory bodies and ethical guidelines increasingly demand transparency, fairness, and accountability from AI systems. This is especially true for critical applications like credit approval, where decisions can significantly impact individuals' lives.
 
 <aside class="positive">
-  Using SHA-256 hashes for both the model and data ensures <b>data integrity</b> and <b>non-repudiation</b>. Any unauthorized modification to either artifact would result in a different hash, providing an immediate audit alert.
+  Understanding <b>why</b> a model makes a specific prediction is crucial for building trust, debugging, ensuring fairness, and complying with regulations like GDPR's "right to explanation" or financial industry guidelines (e.g., Explainable AI in Banking).
 </aside>
 
-**Application Flow:**
-1.  Navigate to the "1. Upload & Configure" page using the sidebar.
-2.  You will find options to either upload your own model (`.pkl` or `.joblib`) and dataset (`.csv`) or load a sample set provided with the application.
+This codelab will guide you through a Streamlit application designed as a **Model Validation & Explainability Control Workbench**. You'll step into the role of Anya Sharma, a Lead Model Validator for PrimeCredit Bank, tasked with validating a new Credit Approval Model (CAM v1.2). Your mission is to ensure this model is transparent, fair, and ready for production by leveraging powerful Explainable AI (XAI) techniques:
 
-```python
-# The application's core logic for loading and hashing artifacts:
-model, full_data, X, y, model_hash_val_local, data_hash_val_local = load_and_hash_artifacts(
-    model_path, data_path, TARGET_COLUMN, RANDOM_SEED
-)
-```
+*   **Global Feature Importance (SHAP):** To understand the overall drivers of the model's decisions.
+*   **Local Instance Explanations (SHAP):** To audit specific individual loan applications, understanding why a particular applicant was approved or denied.
+*   **Counterfactual Explanations (DiCE):** To provide actionable feedback to denied applicants, showing them what minimal changes could lead to an approval.
+*   **Comprehensive Reporting & Auditing:** To synthesize all findings into a structured report and export cryptographically signed artifacts for an audit-ready package.
 
-The `load_and_hash_artifacts` function (from `source.py`) performs the following critical tasks:
-*   **Loads the Model:** Deserializes the machine learning model from the specified path.
-*   **Loads the Data:** Reads the feature dataset into a pandas DataFrame.
-*   **Separates Features and Target:** Divides the dataset into features (`X`) and the target variable (`y`), based on the `TARGET_COLUMN` configured in the application's `source.py` (default `loan_approved`).
-*   **Computes Hashes:** Generates a unique SHA-256 hash for both the loaded model file and the data file.
-*   **Sets Random Seed:** Ensures consistency in operations like data splitting.
+By the end of this codelab, you will have a comprehensive understanding of how to apply these XAI techniques in a practical, interactive setting and appreciate their importance in a robust model validation pipeline.
 
-Once loaded, the application stores these artifacts and their metadata in Streamlit's session state, making them accessible across different pages:
-*   `st.session_state.model`: The loaded ML model object.
-*   `st.session_state.data`: The full raw dataset.
-*   `st.session_state.X`: Features DataFrame.
-*   `st.session_state.y`: Target Series.
-*   `st.session_state.model_hash`: SHA-256 hash of the model file.
-*   `st.session_state.data_hash`: SHA-256 hash of the data file.
-*   `st.session_state.feature_names`: List of feature column names.
-*   `st.session_state.RANDOM_SEED`: The fixed random seed used.
+## 2. Setting Up the Development Environment
+Duration: 0:10
 
-After successful loading, the UI will display the hashes, filenames, random seed, model type, and a preview of the feature data. A training subset `X_train_exp` is also created for generating global explanations.
+To run the Streamlit application and follow along with this codelab, you'll need a Python environment with several libraries installed.
 
-**Architecture Diagram for Data Ingestion:**
+### Prerequisites
+
+*   Python 3.8+
+*   `pip` (Python package installer)
+
+### Installation Steps
+
+1.  **Create a Virtual Environment (Recommended):**
+    A virtual environment helps manage project dependencies without interfering with your global Python installation.
+
+    ```console
+    python -m venv venv
+    ```
+
+2.  **Activate the Virtual Environment:**
+
+    *   **On Windows:**
+        ```console
+        .\venv\Scripts\activate
+        ```
+    *   **On macOS/Linux:**
+        ```console
+        source venv/bin/activate
+        ```
+
+3.  **Install Required Libraries:**
+    The application relies on several data science, machine learning, and visualization libraries.
+
+    ```console
+    pip install streamlit pandas numpy joblib scikit-learn matplotlib shap dice-ml
+    ```
+    <aside class="negative">
+    The `dice-ml` library is essential for counterfactual explanations. If you encounter installation issues or choose not to install it, the application will provide a dummy counterfactual output for demonstration purposes.
+    </aside>
+
+4.  **Save the Application Code:**
+    The provided Streamlit application code needs to be saved as a Python file (e.g., `app.py`). This code includes all the helper functions and the Streamlit UI logic.
+
+    <button>
+      [Download app.py](your_app_file_link_here)
+    </button>
+    (Replace `your_app_file_link_here` with a link to the `app.py` file if hosted).
+
+5.  **Run the Streamlit Application:**
+    Navigate to the directory where you saved `app.py` in your terminal (with the virtual environment activated) and run:
+
+    ```console
+    streamlit run app.py
+    ```
+    This will open the application in your default web browser.
+
+## 3. Understanding the Application Architecture and Data Flow
+Duration: 0:15
+
+The Streamlit application provides an interactive interface to a robust backend of model validation and explainability functions. This step will break down its architecture and how data flows through the system.
+
+### Overall Architecture
+
+The application follows a modular design, integrating core data science utilities with a user-friendly Streamlit frontend.
 
 ```mermaid
 graph TD
-    A[User Uploads Model.pkl] --> B(Load Model File)
-    C[User Uploads Data.csv] --> D(Load Data File)
-    B --> E{Compute SHA-256 Hash for Model}
-    D --> F{Compute SHA-256 Hash for Data}
-    D --> G(Extract Features X and Target Y)
-    E --> H[Store Model Hash in Session State]
-    F --> I[Store Data Hash in Session State]
-    G --> J[Store X, Y, Feature Names in Session State]
-    E & F & G --> K[Initialize SHAP Explainer (TreeExplainer)]
-    K --> L[Application Ready for Explanations]
+    A[Streamlit UI] --> B{Data & Model Loading}
+    B -- Model, Data, Hashes --> C[Global Explanations (SHAP)]
+    B -- Model, Data --> D[Local Explanations (SHAP)]
+    B -- Model, Data --> E[Counterfactuals (DiCE)]
+    C -- Global SHAP DF --> F[Validation Summary]
+    D -- Local SHAP Data, Plots --> F
+    E -- Counterfactual Result --> F
+    F -- Summary Report --> G[Export Artifacts (ZIP)]
+    G --> H[Audit-Ready Bundle]
+
+    subgraph Core Functions (Python)
+        func1[calculate_file_hash]
+        func2[generate_sample_data_and_model]
+        func3[load_and_hash_artifacts]
+        func4[LabelEncoderWrapper]
+        func5[generate_global_shap_explanation]
+        func6[generate_local_shap_explanations]
+        func7[generate_counterfactual_explanation]
+        func8[create_config_snapshot]
+        func9[create_evidence_manifest]
+        func10[bundle_artifacts_to_zip]
+        func11[generate_explanation_summary]
+    end
+
+    B  func1 & func2 & func3 & func4
+    C  func5
+    D  func6
+    E  func7
+    F  func11
+    G  func8 & func9 & func10
 ```
 
-This step is crucial because it establishes the foundational integrity and reproducibility needed for all subsequent explanation generations, aligning perfectly with PrimeCredit Bank's stringent audit requirements.
+### Key Components and Data Flow
 
-## 3. Unveiling Overall Behavior: Global Model Explanations
-Duration: 15:00
+1.  **Streamlit UI (`app.py`):**
+    *   Manages the user interface, page navigation, input widgets (file uploaders, selectors), and output display (dataframes, plots, text).
+    *   Utilizes `st.session_state` to maintain application state across reruns, storing loaded model, data, hashes, explanation results, and generated artifacts.
+    *   Calls backend Python functions based on user interactions.
 
-As a Model Validator, Anya's initial priority is to understand the **general behavior** of the Credit Approval Model (CAM v1.2). Which features, on average, are most influential in its decisions across all loan applications? Global explanations provide this aggregated view, confirming if the model's overall logic aligns with PrimeCredit's lending policies and domain expertise.
+2.  **Core Utility Functions (Integrated `source.py` content):**
+    The application's logic is encapsulated in a set of well-defined Python functions, which are integrated directly into `app.py`.
 
-This application leverages **SHAP (SHapley Additive exPlanations)** values, a powerful and theoretically sound method based on cooperative game theory, for global explanations. For tree-based models (like the `RandomForestClassifier` used in the sample), SHAP is particularly effective.
+    *   **`LabelEncoderWrapper`:** A custom scikit-learn compatible transformer. Standard `LabelEncoder` works on 1D arrays, but `ColumnTransformer` expects transformers to handle 2D inputs. This wrapper adapts `LabelEncoder` for use within a `ColumnTransformer` in the model pipeline, also handling unseen categories by mapping them to the mode of the training data.
+    *   **`generate_sample_data_and_model(model_path, data_path, ...)`:** Creates a synthetic dataset (`credit_data_validation.csv`) and trains a simple `RandomForestClassifier` pipeline (`credit_model_v1.2.pkl`). This is crucial for demonstrating the app's functionalities without requiring external files. The pipeline includes preprocessing for categorical and numerical features using `ColumnTransformer` and the `LabelEncoderWrapper`.
+    *   **`calculate_file_hash(filepath)`:** Computes the SHA-256 hash of a given file. This function is fundamental for ensuring the integrity and traceability of model and data artifacts.
+    *   **`load_and_hash_artifacts(model_path, data_path, ...)`:** Loads the model and data, calculates their hashes, and prepares the data for explanation by applying the model's preprocessing pipeline to the features (`X_processed_df`). It also separates features (`X`), target (`y`), and retains the raw full dataset (`full_data`).
+    *   **`generate_global_shap_explanation(model, X_train_exp, ...)`:** Uses SHAP to calculate mean absolute SHAP values for the processed training data, identifying overall feature importance. It saves the results as a JSON file.
+    *   **`generate_local_shap_explanations(model, X, instance_ids, ...)`:** Generates individual SHAP waterfall plots for selected instances. It also saves detailed explanation data for each instance as JSON.
+    *   **`generate_counterfactual_explanation(model, X_processed_data, ..., desired_class, ...)`:** Leverages the `dice_ml` library (or provides a dummy output) to find minimal changes to a denied instance that would result in an "Approved" decision. It creates a `CustomModelWrapper` to integrate the scikit-learn pipeline with DiCE.
+    *   **`create_config_snapshot(...)`, `create_evidence_manifest(...)`, `bundle_artifacts_to_zip(...)`:** These functions manage the creation of audit-ready artifacts, including a configuration snapshot, a manifest of all generated files with their hashes, and a ZIP archive to bundle everything.
+    *   **`generate_explanation_summary(...)`:** Compiles all the explanation findings (global, local, counterfactual) into a single, human-readable Markdown report.
 
-The fundamental idea behind SHAP values is to attribute the prediction of an instance $x$ to its features by considering the contribution of each feature to moving the prediction from the base value (average prediction) to the current prediction. The sum of the SHAP values for all features and the base value equals the model's output for that instance:
+3.  **Global Variables and Session State (`st.session_state`):**
+    *   The application uses global variables (e.g., `TARGET_COLUMN`, `RANDOM_SEED`) for configuration.
+    *   Crucially, `st.session_state` is used to persist critical objects (`model`, `full_data`, `X`, `y`, `explainer_local`) and results across Streamlit's reruns. This allows continuity as the user navigates through different steps of the validation process. Functions that access these shared resources directly (like `generate_counterfactual_explanation` or `generate_explanation_summary`) explicitly update `globals()` from `st.session_state` to ensure consistency.
 
-$$ \phi_0 + \sum_{{i=1}}^{{M}} \phi_i(f, x) = f(x) $$
+This modular structure allows for clear separation of concerns, making the application easier to develop, debug, and extend.
+
+## 4. Loading Model and Data Artifacts
+Duration: 0:10
+
+The first step in any validation workflow is to establish a clear, reproducible baseline by loading the specific model and dataset under review. This application ensures traceability by calculating cryptographic hashes (SHA-256) of these artifacts.
+
+### 4.1. The Role of Artifact Hashing
+
+Cryptographic hashing is used to create a unique fingerprint of a file. If even a single byte in the file changes, its SHA-256 hash will be drastically different. This provides:
+*   **Integrity:** Assurance that the files haven't been tampered with since their hash was recorded.
+*   **Reproducibility:** A guarantee that the exact same model and data can be identified and used for future audits or experiments.
+
+The `calculate_file_hash` function, shown below, performs this critical task:
+
+```python
+def calculate_file_hash(filepath):
+    """Calculates the SHA256 hash of a file."""
+    hasher = hashlib.sha256()
+    with open(filepath, 'rb') as f:
+        while True:
+            chunk = f.read(8192)  # Read in 8KB chunks
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+```
+
+### 4.2. Loading Data and Model
+
+The application provides two ways to load artifacts:
+
+*   **Custom Upload:** Allows you to upload your own `.pkl` model file and `.csv` feature data.
+*   **Load Sample Credit Model & Data:** Generates a synthetic dataset and trains a dummy `RandomForestClassifier` internally. This is the easiest way to get started.
+
+Both methods use the `load_and_hash_artifacts` function to process the files:
+
+```python
+def load_and_hash_artifacts(model_path, data_path, target_column, random_seed):
+    """Loads model and data, calculates their hashes, and prepares data for explanation."""
+    model = joblib.load(model_path)
+    full_data = pd.read_csv(data_path)
+
+    model_hash = calculate_file_hash(model_path)
+    data_hash = calculate_file_hash(data_path)
+
+    # Separate features and target, then preprocess features using the model's pipeline
+    X_raw = full_data.drop(columns=[target_column])
+    y = full_data[target_column]
+    X_processed = model.named_steps['preprocessor'].transform(X_raw)
+    
+    # ... (code to get feature names and convert to DataFrame) ...
+
+    return model, full_data, X_processed_df, y, model_hash, data_hash
+```
+
+<aside class="positive">
+  It's crucial to load the <b>raw data (`full_data`)</b> for counterfactual explanations (DiCE works best with original feature types) and also the <b>preprocessed feature data (`X`)</b> which is directly consumable by the model. Both are stored in Streamlit's session state.
+</aside>
+
+### 4.3. Hands-on: Load Sample Credit Model & Data
+
+1.  Navigate to **"1. Data & Model Loading"** in the sidebar.
+2.  Click the **"Load Sample Credit Model & Data"** button.
+    *   You will see a spinner indicating that the sample data and model are being generated and loaded.
+    *   The model pipeline includes a `ColumnTransformer` that uses our custom `LabelEncoderWrapper` for categorical features, followed by a `RandomForestClassifier`.
+3.  Once loaded, observe the **"Loaded Artifact Verification"** section, displaying the SHA-256 hashes for both the model and the data.
+4.  Review the **"Feature Data Preview (First 5 Rows - Preprocessed for Model)"** to see the data format that the model directly consumes.
+5.  Review the **"Raw Data Preview (First 5 Rows - Including Target and Original Categoricals)"** to see the original, unprocessed data.
+
+You have now successfully loaded the model and data, establishing a verifiable baseline for your validation process.
+
+## 5. Exploring Global Model Interpretability with SHAP
+Duration: 0:15
+
+Global interpretability helps us understand the model's behavior as a whole, answering questions like: "Which features are generally most important for the model's predictions?" We use **SHAP (SHapley Additive exPlanations)** values for this.
+
+### 5.1. Understanding SHAP Values
+
+SHAP values are a game-theoretic approach to explain the output of any machine learning model. They connect optimal credit allocation with local explanations using Shapley values from cooperative game theory.
+The core idea is to explain a prediction $f(x)$ of an instance $x$ by summing the contributions of each feature:
+
+$$ f(x) = \phi_0 + \sum_{i=1}^{M} \phi_i(f, x) $$
 
 where:
-*   $\phi_0$ is the expected model output (the base value/average prediction).
-*   $M$ is the number of features.
-*   $\phi_i(f, x)$ is the SHAP value for feature $i$ for instance $x$.
 *   $f(x)$ is the model's prediction for instance $x$.
+*   $\phi_0$ is the average (base) prediction for the dataset.
+*   $\phi_i(f, x)$ is the SHAP value for feature $i$, representing its contribution to the difference between the actual prediction and the base prediction.
 
-For global explanations, we aggregate these individual SHAP values. The mean absolute SHAP value for each feature indicates its overall importance.
+For global interpretability, we often look at the **mean absolute SHAP values** across many instances. This aggregates individual feature contributions to give an overall measure of importance.
 
-**Application Flow:**
-1.  Navigate to the "2. Global Explanations" page.
-2.  Click the "Generate Global Explanations" button. This button is enabled only if a model has been loaded.
+### 5.2. Hands-on: Generate Global Explanations
 
-This action triggers the `generate_global_shap_explanation` function (from `source.py`):
+1.  Navigate to **"2. Global Explanations"** in the sidebar.
+2.  Click the **"Generate Global Explanations"** button.
+    *   The application will calculate SHAP values for a subset of your training data (stored in `st.session_state['X_train_exp']`).
+    *   This might take a moment, especially for larger datasets or more complex models.
+
+Once generated, you will see:
+
+*   **Global Feature Importance Table:** A table showing the top features ranked by their Mean Absolute SHAP values. This indicates which features, on average, have the largest impact on the model's output.
+*   **SHAP Summary Plot:** This plot provides a richer view of feature importance.
+    *   Each point on the plot is a Shapley value for a feature and an instance.
+    *   The X-axis indicates the SHAP value (impact on model output).
+    *   The Y-axis lists the features by importance (highest mean absolute SHAP at the top).
+    *   The color represents the feature's value for that instance (e.g., red for high, blue for low).
+    *   This allows you to see the distribution of impacts and how feature values correlate with higher or lower predictions.
+
 ```python
-# Simplified representation of the underlying function call:
-global_importance_df, global_shap_values_raw = generate_global_shap_explanation(
-    st.session_state.model, 
-    st.session_state.X_train_exp, 
-    st.session_state.feature_names, 
-    st.session_state.explanation_dir
-)
-```
+def generate_global_shap_explanation(model, X_train_exp, feature_names, output_dir, positive_class_idx):
+    """Generates global SHAP explanations and saves them."""
+    classifier = model.named_steps['classifier']
+    explainer = shap.TreeExplainer(classifier) # Assumes Tree-based model for now.
+    
+    shap_values = explainer.shap_values(X_train_exp)
 
-**Output and Interpretation:**
-Upon successful generation, the application displays:
-*   **Global Feature Importance Ranking:** A table (`global_importance_df`) listing features by their mean absolute SHAP value, indicating which features have the highest impact.
-*   **SHAP Global Summary Plot:** A visual representation (bar plot) of global feature importance. This plot helps visualize which features are most important and their general direction of impact (though bar plots primarily show magnitude).
+    if isinstance(shap_values, list): # For binary classification, use the positive class
+        shap_values = shap_values[positive_class_idx]
+
+    global_importance = np.abs(shap_values).mean(axis=0)
+    global_importance_df = pd.DataFrame({
+        'Feature': feature_names,
+        'Mean_Abs_SHAP': global_importance
+    }).sort_values(by='Mean_Abs_SHAP', ascending=False).reset_index(drop=True)
+
+    # Save to JSON
+    output_file_path = os.path.join(output_dir, "global_explanation.json")
+    global_importance_df.to_json(output_file_path, orient='records', indent=4)
+    
+    return global_importance_df, output_file_path
+```
 
 <aside class="negative">
-  If you have a very large dataset, generating global SHAP values can be computationally intensive. The application samples up to 1000 instances from `X_train_exp` for plotting purposes to mitigate this, but actual calculation might still take time.
+  For non-tree based models, `shap.KernelExplainer` might be used, which is computationally more intensive. The app automatically switches between `TreeExplainer` (for `RandomForestClassifier`) and `KernelExplainer` (for others, sampling a background dataset for performance).
 </aside>
 
-**Interpretation Example:**
-If `credit_score` is at the top of the importance ranking and shows a large positive SHAP value, it means a higher `credit_score` generally increases the loan approval probability. This aligns with typical lending criteria and gives initial confidence in the model's sensible behavior.
+By analyzing these global explanations, you gain a high-level understanding of the model's inherent biases and primary decision drivers.
 
-This global view is crucial for validating the model's alignment with business rules and providing a high-level overview to non-technical stakeholders and auditors.
+## 6. Analyzing Local Instance Explanations with SHAP Waterfall Plots
+Duration: 0:20
 
-## 4. Deep Dive into Individual Decisions: Local Explanations for Specific Loan Applications
-Duration: 20:00
+While global explanations provide an overall picture, **local interpretability** focuses on understanding why a specific individual prediction was made. This is crucial for auditing individual decisions, providing transparency, and identifying potential issues for specific cases. We again use SHAP values, visualizing them with **waterfall plots**.
 
-While global explanations offer a macro view, they don't answer the crucial question: "Why was *this specific* loan applicant approved or denied?" For PrimeCredit Bank, providing clear, defensible reasons for individual decisions to customers and regulators is paramount. Local explanations, specifically SHAP waterfall plots, allow Anya to dissect the contribution of each feature to a particular prediction.
+### 6.1. Understanding SHAP Waterfall Plots
 
-For a specific instance $x$, the SHAP values $\phi_i(f, x)$ quantify how much each feature $i$ contributes to the prediction $f(x)$ compared to the average prediction $\phi_0$. A positive SHAP value for a feature means it pushed the prediction higher (towards approval), while a negative value pushed it lower (towards denial).
+A SHAP waterfall plot shows how each feature contributes to pushing the model's prediction from a base value (the average prediction) to the final prediction for a specific instance.
 
-**Application Flow:**
-1.  Navigate to the "3. Local Explanations" page.
-2.  The application displays the first few rows of your feature data (`st.session_state.X`) to help you select instances.
-3.  You can select multiple instance IDs (up to 3 is recommended for readability) using the `st.multiselect` widget. The application provides intelligent defaults, suggesting denied, approved, and borderline cases if available.
-4.  Click the "Generate Local Explanations" button. This button is enabled only if a model is loaded and instances are selected.
+*   The plot starts at the **Expected Value** ($\phi_0$), which is the average model output over the training data.
+*   Each bar represents a feature's contribution ($\phi_i(f, x)$).
+*   Bars extending to the right (positive SHAP value) indicate features that increased the prediction towards the positive class (e.g., "Approved").
+*   Bars extending to the left (negative SHAP value) indicate features that decreased the prediction towards the negative class (e.g., "Denied").
+*   The plot ends at the **f(x) value**, which is the model's final output for the instance.
 
-This action triggers the `generate_local_shap_explanations` function (from `source.py`):
+### 6.2. Hands-on: Generate Local Explanations
+
+1.  Navigate to **"3. Local Explanations"** in the sidebar.
+2.  The application will automatically pre-select a few instances (e.g., one approved, one denied, one borderline) if available. You can also select up to 3 specific instance IDs from the dropdown.
+    *   Instance IDs refer to the original row index from your dataset.
+3.  Click the **"Generate Local Explanations"** button.
+    *   The application will compute SHAP values for each selected instance and generate a waterfall plot.
+
+For each selected instance, you will see:
+
+*   **Prediction Probability and Status:** The model's predicted probability for the positive class and whether it resulted in an "Approved" or "Denied" decision.
+*   **Feature Values:**
+    *   **Preprocessed for Model:** The values of features after they've gone through the model's preprocessing pipeline. These are the values the model actually "sees".
+    *   **Raw Feature Values:** The original values of the features from your input dataset. This helps in understanding the context of the preprocessed values.
+*   **Contribution Waterfall Plot:** This visualizes the SHAP contributions for the individual instance. You can see which specific features pushed the decision towards approval or denial and by how much.
+
 ```python
-# Simplified representation of the underlying function call:
-local_explanations_data, shap_explanations_list = generate_local_shap_explanations(
-    st.session_state.model, 
-    st.session_state.X, 
-    st.session_state.instances_for_local_explanation, 
-    st.session_state.shap_explainer_for_local, 
-    st.session_state.explanation_dir
-)
+def generate_local_shap_explanations(model, X, instance_ids, explainer_local, output_dir, positive_class_idx):
+    """Generates local SHAP explanations (waterfall plots) for selected instances."""
+    local_explanations_data = {}
+    
+    for idx in instance_ids:
+        instance_X_processed = X.loc[[idx]] # X is already preprocessed
+        shap_explanation_object = explainer_local(instance_X_processed) # This returns an Explanation object
+
+        if len(shap_explanation_object.values.shape) == 3: # (n_instances, n_features, n_classes)
+            base_val_for_plot = shap_explanation_object.base_values[positive_class_idx].item()
+            shap_values_for_plot = shap.Explanation(
+                values=shap_explanation_object.values[0, :, positive_class_idx],
+                base_values=base_val_for_plot,
+                data=shap_explanation_object.data[0],
+                feature_names=shap_explanation_object.feature_names
+            )
+        else:
+            shap_values_for_plot = shap_explanation_object[0] # Get explanation for the first instance
+            
+        plt.figure()
+        shap.waterfall_plot(shap_values_for_plot, max_display=10, show=False)
+        plot_path = os.path.join(output_dir, f"local_explanation_instance_{idx}.png")
+        plt.savefig(plot_path, bbox_inches='tight')
+        plt.close() # Close figure to free memory
+
+        # Store data for reporting
+        local_explanations_data[idx] = {
+            'instance_features': instance_X_processed.iloc[0].to_dict(),
+            'shap_values': shap_values_for_plot.values.tolist(),
+            'base_value': shap_values_for_plot.base_values.item(),
+            'expected_value': explainer_local.expected_value[positive_class_idx].item() if isinstance(explainer_local.expected_value, np.ndarray) else explainer_local.expected_value.item(),
+            'prediction': model.predict_proba(instance_X_processed)[0, positive_class_idx].item(),
+            'plot_path': os.path.basename(plot_path)
+        }
+    
+    # Save all local explanations to a single JSON
+    output_file_path = os.path.join(output_dir, "local_explanation.json")
+    with open(output_file_path, 'w') as f:
+        json.dump(local_explanations_data, f, indent=4)
+
+    return local_explanations_data, output_file_path
 ```
-The application uses a pre-initialized `shap.TreeExplainer` (stored in `st.session_state.shap_explainer_for_local`) for efficiency, especially with tree-based models.
 
-**Output and Interpretation:**
-For each selected instance, the application displays:
-*   **JSON Summary:** A detailed JSON object (`local_explanations_data`) summarizing the instance's features, actual prediction, base value, and each feature's SHAP contribution.
-*   **SHAP Waterfall Plot:** A visual representation that shows how each feature's value contributes to pushing the model's output from the `base value` (the average prediction) to the `final prediction` for that specific instance. Features pushing the prediction higher are typically shown in blue/positive, and those pushing it lower in red/negative.
+Local explanations are invaluable for debugging model behavior on edge cases, ensuring fairness for specific demographics, and providing clear reasons for model decisions to affected individuals.
 
-**Flowchart for Local Explanations:**
+## 7. Generating Actionable Counterfactual Explanations with DiCE
+Duration: 0:20
 
-```mermaid
-graph TD
-    A[Select Specific Instance ID(s)] --> B{Retrieve Instance Data X_i}
-    B --> C(Run SHAP Explainer on X_i)
-    C --> D[Calculate SHAP Values for Each Feature in X_i]
-    D --> E{Generate JSON Explanation Data}
-    D --> F{Generate SHAP Waterfall Plot}
-    E --> G[Display JSON in Streamlit Expander]
-    F --> H[Display Waterfall Plot in Streamlit Expander]
-    G & H --> I[Model Validator Interprets Individual Decision]
-```
+While local explanations tell us *why* a decision was made, **counterfactual explanations** tell us *what needs to change* for a different decision to be made. This is particularly powerful for providing actionable feedback, especially to individuals who have been denied a service (e.g., a loan).
 
-**Interpretation Example:**
-For a denied application, a waterfall plot might clearly show a low `credit_score` and a high `debt_to_income` ratio as the dominant negative contributors, pushing the predicted approval probability below the decision threshold. Conversely, for an approved application, high `income` and `employment_duration` could be the primary positive factors.
+### 7.1. Understanding Counterfactuals
 
-This level of detail is invaluable for:
-*   **Verifying decision logic:** Ensuring specific reasons align with PrimeCredit's policy.
-*   **Identifying potential biases:** Checking if any features disproportionately influence decisions in specific cases without valid business rationale.
-*   **Providing actionable feedback:** Crucial for communicating with applicants about why their loan was denied.
+A counterfactual explanation for an instance $x$ aims to find a new instance $x'$ that is as similar as possible to $x$, but for which the model's prediction $f(x')$ is the desired outcome ($y'$).
 
-Local explanations are a cornerstone of model transparency, fulfilling a critical requirement for internal auditors and regulators.
+The problem can be formulated as an optimization:
 
-## 5. "What If?": Understanding Counterfactuals for Actionable Insights
-Duration: 15:00
-
-Knowing *why* a loan was denied (via local explanations) is important, but for a denied applicant, a more pressing question is often "What could I have done differently?" This is where **counterfactual explanations** provide immense value. They identify the *minimal* changes required to an applicant's features that would flip the model's decision from denial to approval. This insight is not only empowering for customers but also valuable for PrimeCredit Bank in refining lending criteria.
-
-The objective of generating a counterfactual example $x'$ for an original instance $x$ that results in a different prediction $y'$ is to minimize the distance between $x$ and $x'$, subject to the constraint that $x'$ belongs to the feasible input space $\mathcal{{X}}$ and the model $f$ predicts $y'$ for $x'$. This can be formalized as:
-
-$$ \min_{{x'}} \text{{distance}}(x, x') \quad \text{{s.t.}} \quad f(x') = y' \quad \text{{and}} \quad x' \in \mathcal{{X}} $$
+$$ \min_{x'} \text{distance}(x, x') \quad \text{s.t.} \quad f(x') = y' \quad \text{and}} \quad x' \in \mathcal{X} $$
 
 where:
-*   $\text{{distance}}(x, x')$ is a measure of proximity (e.g., L1 or L2 norm), quantifying how "close" the counterfactual is to the original.
-*   $f(x')$ is the model's prediction for the counterfactual instance $x'$.
-*   $y'$ is the desired outcome (e.g., loan approval).
-*   $x' \in \mathcal{{X}}$ ensures the counterfactual features are plausible and within realistic bounds.
+*   $x$ is the original instance (e.g., a denied loan application).
+*   $x'$ is the counterfactual instance.
+*   $\text{distance}(x, x')$ quantifies the similarity between $x$ and $x'$ (we want minimal changes).
+*   $f(x')$ is the model's prediction for the counterfactual, which must equal $y'$ (the desired outcome, e.g., "Approved").
+*   $x' \in \mathcal{X}$ ensures that the counterfactual instance is realistic and within the domain of valid inputs.
 
-**Application Flow:**
-1.  Navigate to the "4. Counterfactuals" page.
-2.  The application will automatically populate a dropdown with instance IDs corresponding to **denied** loan applications (where `st.session_state.y == 0`). You must select one of these. If no denied instances are found, a warning will be displayed.
-3.  Click the "Generate Counterfactual Example" button. This button is enabled only if a model is loaded and a denied instance is selected.
+We use the **DiCE (Diverse Counterfactual Explanations)** library for this.
 
-This action triggers the `generate_counterfactual_explanation` function (from `source.py`):
+### 7.2. The `CustomModelWrapper` for DiCE
+
+The `dice_ml` library needs a `Model` object that can interact with its internal `Data` object. Since our model is a `scikit-learn` `Pipeline` (including a `ColumnTransformer` for preprocessing), a direct integration can be tricky. The `CustomModelWrapper` solves this by encapsulating our pipeline and ensuring that raw data (as generated by DiCE for counterfactual search) is correctly preprocessed before being fed to the classifier:
+
 ```python
-# Simplified representation of the underlying function call:
-counterfactual_data = generate_counterfactual_explanation(
-    st.session_state.model, 
-    st.session_state.X, 
-    st.session_state.feature_names, 
-    st.session_state.denied_instance_for_cf_idx, # The selected denied instance
-    1, # Desired class (1 for approved)
-    st.session_state.explanation_dir
-)
+class CustomModelWrapper:
+    def __init__(self, pipeline_model):
+        self.pipeline = pipeline_model
+        self.preprocessor = pipeline_model.named_steps['preprocessor']
+        self.classifier = pipeline_model.named_steps['classifier']
+        self.feature_names_in_order = X_processed_data.columns.tolist() # Expected feature order
+
+    def predict_proba(self, raw_data_df):
+        # DiCE generates raw_data_df. We need to preprocess it
+        # ensuring column order and handling missing columns if DiCE changes structure
+        expected_raw_cols = globals()['full_data'].drop(columns=[globals()['TARGET_COLUMN']]).columns
+        aligned_raw_df = raw_data_df.copy()
+        for col in expected_raw_cols:
+            if col not in aligned_raw_df.columns:
+                # Fill missing columns with mode/mean for robustness
+                if globals()['full_data'][col].dtype == 'object':
+                    aligned_raw_df[col] = globals()['full_data'][col].mode()[0]
+                else:
+                    aligned_raw_df[col] = globals()['full_data'][col].mean()
+        aligned_raw_df = aligned_raw_df[expected_raw_cols] # Reorder columns
+        
+        X_processed_cf = self.preprocessor.transform(aligned_raw_df)
+        X_processed_cf_df = pd.DataFrame(X_processed_cf, columns=self.feature_names_in_order, index=raw_data_df.index)
+
+        return self.classifier.predict_proba(X_processed_cf_df)
 ```
 
-**Output and Interpretation:**
-The application displays a detailed `counterfactual_result` object, which includes:
-*   **Original Instance:** The feature values of the denied applicant.
-*   **Original Prediction Probability:** The probability of approval for the original instance.
-*   **Counterfactual Instance:** The modified feature values that would lead to approval.
-*   **Counterfactual Prediction Probability:** The probability of approval for the counterfactual instance (which should be above the threshold for class 1).
-*   **Features Changed to Flip Prediction:** A dictionary highlighting precisely which features were changed and by how much.
+This wrapper ensures a seamless integration between DiCE and our complex `scikit-learn` model pipeline.
 
-**Diagram for Counterfactual Generation:**
+### 7.3. Hands-on: Generate Counterfactual Example
 
-```mermaid
-graph TD
-    A[Denied Instance (x)] --> B{Model Predicts: Denied (f(x) = y_denied)}
-    B --> C(Define Desired Outcome: Approved (y_approved))
-    C --> D[Counterfactual Algorithm]
-    D -- Iteratively Adjust x --> E{Find x' such that f(x') = y_approved}
-    E -- Minimize Distance(x, x') --> F(Output Counterfactual Instance x')
-    F --> G[Highlight Features Changed (x -> x')]
-    G --> H[Display Original, Counterfactual, and Changes in UI]
-    H --> I[Model Validator Gives Actionable Feedback]
-```
+1.  Navigate to **"4. Counterfactuals"** in the sidebar.
+2.  The application will automatically identify and list "denied" instances (predictions `< 0.5` for the positive class). Select one from the dropdown.
+3.  Click the **"Generate Counterfactual Example"** button.
+    *   The application will invoke DiCE (or its dummy placeholder) to search for a counterfactual. This process can be computationally intensive and might take some time.
 
-**Interpretation Example:**
-If the original instance had a `credit_score` of 600 and was denied, the counterfactual might suggest that if `credit_score` were 650 (a change of +50 points) and `debt_to_income` were reduced by 5%, the loan would be approved. This provides concrete, actionable advice.
+Once the counterfactual is generated, you will see:
 
-This functionality empowers PrimeCredit Bank to:
-*   **Inform customers constructively:** Provide applicants with specific steps to improve their eligibility.
-*   **Refine policy:** Identify consistently critical features, potentially leading to policy reviews.
-*   **Assess model sensitivity:** Understand how susceptible the model is to changes in specific features.
+*   **Original Instance (Denied - Raw Features):** The feature values of the chosen denied applicant.
+*   **Counterfactual Instance (Approved - Raw Features):** The modified feature values that would lead to an "Approved" decision.
+*   **Actionable Feedback:** A concise summary of the minimal changes required. For example, "To get approved, consider: increase Income by 5000; change EmploymentType from 'Unemployed' to 'Salaried'."
 
-Counterfactuals bridge the gap between "why" and "what to do next," making AI systems more helpful and trustworthy.
-
-## 6. Identifying Gaps: Interpretability Analysis and Validation Findings
-Duration: 10:00
-
-After generating global, local, and counterfactual explanations, Anya's crucial role as a Model Validator is to synthesize these findings. This involves identifying any **interpretability gaps** that could hinder the CAM v1.2's deployment or introduce risks for PrimeCredit Bank. An interpretability gap might be a statistically significant feature lacking business rationale, inconsistent local explanations for similar cases, or counterfactuals that suggest unrealistic changes.
-
-This step focuses on documenting observations, evaluating the model's transparency, and formulating a recommendation.
-
-**Anya's Analysis Focuses On:**
-*   **Coherence with Policy:** Do the explanations consistently align with PrimeCredit's established lending policies and regulations?
-*   **Transparency:** Are the reasons for decisions clear, concise, and easily understandable by non-technical stakeholders (e.g., loan officers, customers, auditors)?
-*   **Consistency:** Do similar cases receive similar explanations, and are there any anomalous or contradictory explanations?
-*   **Actionability:** Do counterfactuals provide practical, achievable advice for applicants?
-
-**Application Flow:**
-1.  Navigate to the "5. Validation Summary" page.
-2.  Click the "Generate Validation Summary" button. This button is enabled if at least some explanations (global, local, or counterfactual) have been generated.
-
-This action triggers the `generate_explanation_summary` function (from `source.py`):
 ```python
-# Simplified representation of the underlying function call:
-summary_content = generate_explanation_summary(
-    st.session_state.global_importance_df, 
-    st.session_state.local_explanations_data, 
-    st.session_state.counterfactual_result, 
-    st.session_state.explanation_dir
-)
+def generate_counterfactual_explanation(model, X_processed_data, feature_names, instance_id, desired_class, output_dir):
+    """Generates a counterfactual explanation for a denied instance."""
+    # ... (code to retrieve original instance and handle dice_ml import) ...
+
+    d = dice_ml.Data(
+        dataframe=dice_data_raw,
+        continuous_features=raw_continuous_features,
+        outcome_name=TARGET_COLUMN
+    )
+
+    m = dice_ml.Model(model=CustomModelWrapper(model), backend="sklearn", model_type='classifier')
+    
+    exp = dice_ml.Dice(d, m, method="kdtree")
+
+    query_instance_raw = dice_data_raw.loc[[instance_id]]
+    
+    dice_exp = exp.generate_counterfactuals(
+        query_instance_raw,
+        total_CFs=1,
+        desired_class=desired_class,
+        permitted_range=None
+    )
+    
+    cf_df = dice_exp.cf_examples_list[0].final_cfs_df
+    # ... (code to generate changes_text and prepare counterfactual_result dict) ...
+
+    output_file_path = os.path.join(output_dir, "counterfactual_example.json")
+    with open(output_file_path, 'w') as f:
+        json.dump(counterfactual_result, f, indent=4)
+
+    return counterfactual_result
 ```
 
-**Output and Interpretation:**
-The application generates and displays a markdown-formatted report (`explanation_summary_md`) that consolidates findings from all previous explanation steps. This report typically includes:
-*   An overview of global feature importance.
-*   Summaries of selected local explanation cases.
-*   Details of the counterfactual analysis.
-*   A section identifying "Interpretability Gaps" (e.g., complex feature interactions, unclear impact of specific features).
-*   Recommendations for PrimeCredit Bank based on the findings (e.g., "approve with caveats," "require further model refinement").
+Counterfactual explanations empower users with transparency and guidance, making AI decisions more understandable and fair.
 
-<aside class="negative">
-  Due to internal design constraints, the model and data hashes displayed directly within the `explanation_summary.md` in the UI are derived from the initial load of sample files in `source.py`. For the <b>actual, verified hashes</b> of *your dynamically uploaded model and data*, always refer to the `config_snapshot.json` file within the final exported artifact bundle (Step 7).
+## 8. Synthesizing a Validation Summary Report
+Duration: 0:10
+
+After performing global, local, and counterfactual analyses, the next crucial step is to consolidate all findings into a comprehensive **Validation & Interpretability Report**. This report serves as a central document for auditors, stakeholders, and model developers, providing a structured overview of the model's behavior and validation outcomes.
+
+### 8.1. The Importance of a Summary Report
+
+A well-structured summary report is vital for:
+*   **Communication:** Clearly conveys complex XAI findings to both technical and non-technical audiences.
+*   **Decision-Making:** Informs stakeholders about model strengths, weaknesses, and potential biases, aiding in deployment decisions.
+*   **Compliance:** Provides documented evidence for regulatory audits.
+*   **Reproducibility:** Records the specific model and data versions used, linking back to their cryptographic hashes.
+
+The `generate_explanation_summary` function in our application is responsible for creating this Markdown-formatted report. It pulls data from all previously generated explanations.
+
+```python
+def generate_explanation_summary(global_importance_df, local_explanations_data, counterfactual_result, output_dir):
+    """Generates a markdown summary of all explanations."""
+    summary_path = os.path.join(output_dir, "explanation_summary.md")
+    
+    with open(summary_path, "w") as f:
+        f.write("# Model Validation & Explainability Summary Report\n\n")
+        f.write(f"**Run ID:** `{globals()['run_id']}`\n")
+        f.write(f"**Date:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n")
+        f.write(f"**Model Hash:** `{globals()['model_hash_val']}`\n")
+        f.write(f"**Data Hash:** `{globals()['data_hash_val']}`\n\n")
+        
+        f.write("## 1. Global Feature Importance\n")
+        # ... (writes global importance table) ...
+
+        f.write("## 2. Local Instance Explanations\n")
+        # ... (writes local explanation details for selected instances) ...
+
+        f.write("## 3. Counterfactual Analysis\n")
+        # ... (writes counterfactual details and actionable feedback) ...
+
+        f.write("")
+        f.write("\n**End of Report**\n")
+```
+<aside class="positive">
+  Notice how the function uses `globals()['run_id']`, `globals()['model_hash_val']`, etc. This pattern is used to access values that are stored in Streamlit's `st.session_state` but need to be visible to the helper functions for robust data access.
 </aside>
 
-This structured summary is a primary artifact for internal audit teams and senior leadership. It demonstrates Anya's comprehensive analysis, highlighting potential risks and providing actionable recommendations for the CAM v1.2's deployment readiness. By clearly documenting these observations, the application enables informed decision-making regarding the model's production use.
+### 8.2. Hands-on: Generate and Review Summary
 
-## 7. Audit Trail: Reproducibility and Artifact Bundling
-Duration: 10:00
+1.  Navigate to **"5. Validation Summary"** in the sidebar.
+2.  Click the **"Generate Explanation Summary"** button.
+    *   This action will compile all previous findings into a Markdown report.
+    *   Ensure that you have generated Global and Local Explanations (and ideally Counterfactuals) in previous steps for a comprehensive report.
+3.  Review the generated report directly within the Streamlit application.
+    *   Pay attention to how the global insights, specific instance analyses, and actionable feedback are presented.
 
-The final and most critical step in Anya's model validation workflow is to ensure that all her work is fully reproducible and securely bundled for auditing. For PrimeCredit Bank, regulatory compliance demands an immutable record of all explanation artifacts, along with the configuration and cryptographic hashes that guarantee their traceability to specific model and data versions. This "audit-ready artifact bundle" provides indisputable evidence of the validation process.
+This step allows you to review the entire validation narrative and ensure that all findings are clearly articulated before packaging them for audit.
 
-This process involves consolidating all generated explanations, configuration details, and a manifest (`evidence_manifest.json`) containing SHA-256 hashes of each file into a single, timestamped ZIP archive.
+## 9. Exporting Audit-Ready Artifacts
+Duration: 0:10
 
-The SHA-256 hash function takes an input (e.g., a file's content) and produces a fixed-size, 256-bit (32-byte) hexadecimal string. Even a minuscule change to the input will result in a completely different hash, making it an excellent tool for verifying data integrity:
+The final step in our validation workflow is to bundle all generated explanations, configuration snapshots, and reports into a single, cryptographically signed, **audit-ready ZIP archive**. This package provides a tamper-evident record of the entire validation process, essential for regulatory compliance and long-term model governance.
 
-$$ \text{{SHA-256}}(\text{{file\_content}}) = \text{{hexadecimal\_hash\_string}} $$
+### 9.1. Components of the Audit Bundle
 
-**Application Flow:**
-1.  Navigate to the "6. Export Artifacts" page.
-2.  Click the "Generate & Bundle All Audit Artifacts" button. This button is enabled once a model has been loaded.
+The audit bundle typically includes:
 
-This action triggers a sequence of functions (from `source.py`):
-*   `create_config_snapshot`: This function creates a `config_snapshot.json` file, capturing the model hash, data hash, random seed, and other relevant configuration details from the session state. This file is crucial for reproducing the exact environment and data versions used for validation.
-*   `create_evidence_manifest`: This function generates an `evidence_manifest.json`. It iterates through all generated explanation files (global, local, counterfactual, summary, and the config snapshot) and calculates their individual SHA-256 hashes. This manifest serves as a cryptographic record of each artifact's integrity.
-*   `bundle_artifacts_to_zip`: Finally, this function collects all the generated files (explanation JSONs, markdown summary, config snapshot, and evidence manifest) into a single, timestamped ZIP archive.
+*   **`config_snapshot.json`:** A file detailing the hashes of the model and data artifacts, along with other configuration parameters (e.g., random seed, timestamp of the validation run). This provides metadata about the validation environment.
+*   **`evidence_manifest.json`:** A manifest file listing every file included in the bundle, along with its SHA-256 hash. This allows an auditor to verify the integrity of the entire package.
+*   **Explanation Outputs:** JSON files containing the raw data for global, local, and counterfactual explanations.
+*   **Visualizations:** PNG images of SHAP waterfall plots.
+*   **Summary Report:** The `explanation_summary.md` file you reviewed in the previous step.
+
+### 9.2. Functions for Bundling
+
+*   **`create_config_snapshot(...)`:** Generates the configuration JSON file.
+*   **`create_evidence_manifest(...)`:** Iterates through all files destined for the bundle, calculates their individual hashes, and stores them in a manifest JSON.
+*   **`bundle_artifacts_to_zip(...)`:** Compresses the entire directory containing all these artifacts into a single ZIP file.
 
 ```python
-# Simplified representation of the underlying function calls:
-# 1. Create a snapshot of the configuration
-config_file_path = create_config_snapshot(
-    st.session_state.model_hash, 
-    st.session_state.data_hash, 
-    st.session_state.RANDOM_SEED, 
-    st.session_state.explanation_dir
-)
+def create_config_snapshot(model_hash, data_hash, random_seed, output_dir):
+    """Creates a configuration snapshot file."""
+    config_data = {
+        "model_hash": model_hash,
+        "data_hash": data_hash,
+        "random_seed": random_seed,
+        "timestamp": datetime.datetime.now().isoformat()
+    }
+    config_file_path = os.path.join(output_dir, "config_snapshot.json")
+    with open(config_file_path, 'w') as f:
+        json.dump(config_data, f, indent=4)
+    return config_file_path
 
-# 2. Identify all generated files for bundling
-output_files_candidates = [
-    os.path.join(st.session_state.explanation_dir, 'global_explanation.json'),
-    # ... other explanation files ...
-    config_file_path
-]
-st.session_state.output_files_to_bundle = [f for f in output_files_candidates if os.path.exists(f)]
+def create_evidence_manifest(output_dir, files_to_bundle):
+    """Creates a manifest file with hashes of all bundled files."""
+    manifest_data = {"files": []}
+    for filepath in files_to_bundle:
+        if os.path.exists(filepath):
+            file_hash = calculate_file_hash(filepath)
+            manifest_data["files"].append({
+                "filename": os.path.basename(filepath),
+                "path": os.path.relpath(filepath, output_dir),
+                "sha256_hash": file_hash
+            })
+    manifest_file_path = os.path.join(output_dir, "evidence_manifest.json")
+    with open(manifest_file_path, 'w') as f:
+        json.dump(manifest_data, f, indent=4)
+    return manifest_file_path
 
-# 3. Create a manifest of all files with their hashes
-manifest_file_path = create_evidence_manifest(
-    st.session_state.explanation_dir, 
-    st.session_state.output_files_to_bundle
-)
-st.session_state.output_files_to_bundle.append(manifest_file_path)
-
-# 4. Bundle everything into a ZIP
-zip_archive_path = bundle_artifacts_to_zip(st.session_state.explanation_dir, st.session_state.run_id)
-st.session_state.zip_archive_path = zip_archive_path
+def bundle_artifacts_to_zip(explanation_dir, run_id):
+    """Bundles all generated artifacts into a single ZIP archive."""
+    zip_filename = f"{run_id}_audit_bundle.zip"
+    zip_archive_path = os.path.join("reports", zip_filename)
+    os.makedirs(os.path.dirname(zip_archive_path), exist_ok=True)
+    
+    with zipfile.ZipFile(zip_archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(explanation_dir):
+            for file in files:
+                filepath = os.path.join(root, file)
+                arcname = os.path.relpath(filepath, explanation_dir)
+                zipf.write(filepath, arcname)
+    return zip_archive_path
 ```
 
-**Output and Interpretation:**
-Upon successful bundling, the application displays a confirmation message and enables a "Download Audit-Ready Artifact Bundle" button.
+### 9.3. Hands-on: Export Audit-Ready Bundle
 
-<button>
-  [Download Audit-Ready Artifact Bundle](javascript:void(0))
-</button>
+1.  Navigate to **"6. Export Artifacts"** in the sidebar.
+2.  Click the **"Export Audit-Ready Bundle (.zip)"** button.
+    *   This button will be enabled only if the summary report has been generated.
+    *   The application will create the config snapshot, the evidence manifest, and then compress all relevant files into a ZIP archive.
+3.  Once completed, you will see a success message and a **"Download Audit Bundle (.zip)"** button. Click this button to download your comprehensive audit package.
 
-The downloaded ZIP archive contains:
-*   `global_explanation.json`: Details of global feature importance.
-*   `local_explanation.json`: Details of selected local explanations.
-*   `counterfactual_example.json`: Details of the counterfactual analysis.
-*   `explanation_summary.md`: The comprehensive validation summary report.
-*   `config_snapshot.json`: A snapshot of the model, data hashes, and random seed.
-*   `evidence_manifest.json`: The cryptographic manifest linking all files to their SHA-256 hashes.
+This final step ensures that all the hard work put into validating and explaining the model is packaged into an easily consumable and verifiable format, ready for any regulatory scrutiny.
 
-**Audit Trail Diagram:**
+## 10. Conclusion and Next Steps
+Duration: 0:05
 
-```mermaid
-graph TD
-    A[Global Explanation JSON] --> Z
-    B[Local Explanation JSON] --> Z
-    C[Counterfactual JSON] --> Z
-    D[Validation Summary MD] --> Z
-    E[Configuration Snapshot JSON] --> Z
-    Z(Create Evidence Manifest: Calculate SHA-256 Hashes for A,B,C,D,E) --> F[Evidence Manifest JSON]
-    A & B & C & D & E & F --> G{Bundle All Artifacts into ZIP}
-    G --> H[Download Audit-Ready ZIP Archive]
-```
+Congratulations! You have successfully navigated the **QuLab: Interpretable AI for Model Validation Workbench**.
 
-This single, self-contained ZIP archive is PrimeCredit Bank's **audit-ready artifact bundle**. It ensures:
-1.  **Reproducibility:** The `config_snapshot.json` captures all parameters needed to regenerate these explanations, including the exact model and data hashes.
-2.  **Traceability:** The `evidence_manifest.json` provides cryptographic proof of the integrity and origin of each artifact, linking them directly to the validated model and data versions.
-3.  **Compliance:** All necessary documentation for internal auditors, regulators, and senior stakeholders is readily available and verifiable, significantly reducing regulatory risk and building trust in the AI system.
+Through this codelab, you have:
+*   Understood the critical importance of Explainable AI (XAI) in model validation and regulatory compliance, especially in sensitive domains like credit approval.
+*   Learned how to load and hash model and data artifacts to ensure reproducibility and integrity.
+*   Applied **Global SHAP explanations** to understand the overall feature importance and drivers of model predictions.
+*   Utilized **Local SHAP explanations** and waterfall plots to dive deep into individual model decisions, gaining insights into specific applicant approvals or denials.
+*   Generated **Counterfactual explanations** using DiCE to provide actionable feedback for denied applicants, showing them what minimal changes could alter a negative decision.
+*   Synthesized all findings into a comprehensive **Validation Summary Report**.
+*   Packaged all generated evidence and reports into a cryptographically signed, **audit-ready ZIP archive**.
 
-This completes the model validation task, providing PrimeCredit Bank with the necessary confidence to proceed with the CAM v1.2's deployment, knowing its decisions are explainable, transparent, and auditable.
+These skills are invaluable for any data scientist, ML engineer, or model validator working with high-stakes AI systems. The ability to interpret, explain, and audit models fosters trust, enables debugging, and facilitates responsible AI development.
+
+### Further Exploration
+
+*   **Experiment with different models:** How would the explanations change if you used a simpler model (e.g., Logistic Regression) or a more complex one (e.g., Gradient Boosting)?
+*   **Investigate fairness:** Use SHAP or DiCE to analyze if certain demographic groups are disproportionately impacted by the model's decisions or if they receive less actionable feedback.
+*   **Enhance counterfactuals:** Explore more advanced DiCE features like specifying feature constraints or generating diverse counterfactuals.
+*   **Integrate with MLOps pipelines:** Consider how these explainability steps can be automated and incorporated into continuous integration/continuous delivery (CI/CD) pipelines for ML models.
+*   **Explore other XAI libraries:** Beyond SHAP and DiCE, delve into LIME, InterpretML, or Captum for alternative explanation methods.
+
+Thank you for completing this codelab. May your AI models be ever more transparent and trustworthy!
