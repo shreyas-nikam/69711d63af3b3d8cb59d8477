@@ -3,199 +3,212 @@ summary: Lab 5: Interpretability & Explainability Control Workbench User Guide
 feedback link: https://docs.google.com/forms/d/e/1FAIpQLSfWkOK-in_bMMoHSZfcIvAeO58PAH9wrDqcxnJABHaxiDqhSA/viewform?usp=sf_link
 environments: Web
 status: Published
-# QuLab: Model Interpretability & Explainability Control Workbench User Guide
+# QuLab: Model Interpretability & Explainability Workbench Codelab
 
-## 1. Welcome to PrimeCredit Bank's Model Validation Workbench
+## 1. Introduction: Your Mission as a Model Validator
 Duration: 0:05
 
-<aside class="positive">
-This codelab is designed to walk you through the process of validating a machine learning model for transparency, fairness, and compliance using interpretability and explainability techniques. You'll take on the role of **Anya Sharma**, a Model Validator at PrimeCredit Bank, tasked with ensuring a new Credit Approval Model (CAM v1.2) is ready for deployment.
-</aside>
-
-As Anya Sharma, a dedicated Model Validator at PrimeCredit Bank, your primary responsibility is to ensure that all machine learning models used in critical business processes are transparent, fair, and compliant with internal governance and external regulatory standards.
-
-Today, your focus is on a newly developed **Credit Approval Model (CAM v1.2)**, which will determine loan eligibility for our customers. Before this model can be deployed, you must rigorously assess its interpretability and explainability.
-
-This workbench will guide you through:
-*   **Understanding the Model's Overall Behavior**: What are the most important factors globally?
-*   **Explaining Individual Decisions**: Why was a specific loan applicant approved or denied?
-*   **Generating Actionable Insights**: What minimal changes would flip a denied decision to an approval?
-*   **Synthesizing Findings**: Documenting interpretability gaps and recommendations.
-*   **Bundling Audit-Ready Artifacts**: Ensuring reproducibility and compliance.
-
-This application serves as your workbench to generate, analyze, and document the required explanations as audit-ready artifacts.
-
-To begin your validation journey, navigate to the **'1. Upload & Configure'** page using the sidebar.
-
-## 2. Setting the Stage: Environment Setup and Data Ingestion
-Duration: 0:05
-
-Your first step as Anya is to prepare your environment and load the necessary model and data for validation. Reproducibility is paramount in model validation; therefore, you will fix a random seed and compute SHA-256 hashes for both the model and dataset to ensure traceability and detect any unauthorized changes.
-
-### Loading Model and Data
-
-On this page, you have two options to load the Credit Approval Model and its corresponding feature dataset:
-
-1.  **Upload Your Own Files**: If you have a `.pkl` or `.joblib` model file and a `.csv` dataset, you can upload them using the respective file uploaders. Once both are selected, click the **"Load Uploaded Files"** button.
-2.  **Load Sample Data**: To quickly get started, you can use PrimeCredit Bank's provided sample model and data. Click the **"Load Sample Data"** button. This will automatically load a `sample_credit_model.pkl` and `sample_credit_data.csv`.
+Welcome to the **QuLab: Model Interpretability & Explainability Control Workbench**! This codelab is designed to guide you through the process of validating and understanding a machine learning model's behavior using advanced explainability techniques.
 
 <aside class="positive">
-For this codelab, we recommend using the **"Load Sample Data"** option to proceed quickly through the steps.
+<b>Important Context:</b> You are Anya Sharma, the Lead Model Validator at PrimeCredit Bank. Your critical mission is to evaluate the new Credit Approval Model (CAM v1.2) for transparency, fairness, and compliance before it is deployed. This workbench is your primary tool for this task.
 </aside>
 
-Once the files are loaded, you will see a confirmation message and details about the loaded artifacts:
+This application will walk you through a structured workflow to:
+1.  **Load Data & Model**: Establish a verifiable starting point.
+2.  **Global Explanations**: Understand overall model behavior.
+3.  **Local Explanations**: Investigate specific individual predictions.
+4.  **Counterfactuals**: Provide actionable feedback for denied applications.
+5.  **Validation Summary**: Compile your findings into a comprehensive report.
+6.  **Export Artifacts**: Create a secure, auditable package of your validation evidence.
 
-*   **Model File:** The name of your loaded model file.
-*   **Model Hash (SHA-256):** A unique cryptographic hash for the model. This hash will change if the model file is altered in any way, ensuring its integrity.
-*   **Data File:** The name of your loaded data file.
-*   **Data Hash (SHA-256):** A unique cryptographic hash for the dataset, ensuring its integrity.
-*   **Random Seed Used:** The random seed used for reproducibility in data splitting.
-*   **Model type identified:** The type of machine learning model (e.g., `sklearn.ensemble.RandomForestClassifier`).
-*   **Data features:** A list of all features in your dataset.
+Let's begin by setting up your validation environment. Navigate to the "1. Data & Model Loading" section in the sidebar to start.
 
-You will also see the first 5 rows of the feature data, allowing you to quickly inspect the data.
-
-The initial setup is complete. You've successfully loaded the Credit Approval Model and the associated feature dataset. Crucially, you've generated cryptographic hashes for both artifacts. These hashes are vital for maintaining an immutable audit trail; any future change to either the model or the dataset would result in a different hash, immediately signaling a potential issue to an auditor. This step aligns with PrimeCredit Bank's stringent requirements for data and model integrity. The data has also been pre-processed, separating features from the target variable, making it ready for explanation generation.
-
-## 3. Unveiling Overall Behavior: Global Model Explanations
+## 2. Setting Up Your Validation Environment: Data & Model Loading
 Duration: 0:10
 
-As a Model Validator, your first task is to grasp the overall behavior of the CAM v1.2. Which factors generally drive its decisions for approving or denying loans? Global explanations provide an aggregate view of feature importance, revealing which features have the most impact across all predictions. This helps you verify if the model's general logic aligns with PrimeCredit's lending policies and expert domain knowledge.
+The first step in any robust model validation is to ensure that the exact model and data used for evaluation can be reproduced and traced. This application facilitates this by generating **cryptographic hashes (SHA-256)** for your loaded artifacts. A hash is like a unique digital fingerprint; if even a single byte of the file changes, its hash will be completely different, ensuring the integrity and authenticity of your model and data.
 
-For tree-based models like our `RandomForestClassifier`, SHAP (SHapley Additive exPlanations) values are an excellent choice for this. The SHAP value $\phi_i$ for a feature $i$ represents the average marginal contribution of that feature value to the prediction across all possible coalitions of features.
+The "1. Data & Model Loading" page offers two primary ways to load your artifacts:
 
-The fundamental idea behind SHAP values is to attribute the prediction of an instance $x$ to its features by considering the contribution of each feature to moving the prediction from the base value (average prediction) to the current prediction. The sum of the SHAP values for all features and the base value equals the model's output for that instance:
+### Custom Upload
 
-$$ \phi_0 + \sum_{{i=1}}^{{M}} \phi_i(f, x) = f(x) $$
+This option allows you to upload your own machine learning model (as a `.pkl` file) and its corresponding feature data (as a `.csv` file). This is ideal for validating new or updated models in your specific environment.
 
-where $\phi_0$ is the expected model output (the base value), $M$ is the number of features, $\phi_i(f, x)$ is the SHAP value for feature $i$ for instance $x$, and $f(x)$ is the model's prediction for instance $x$.
+1.  Click **"Upload Model (.pkl)"** and select your model file.
+2.  Click **"Upload Feature Data (.csv)"** and select your dataset.
+3.  Click the **"Load Custom Model & Data"** button. The application will then load these files, preprocess the data as required by the model's pipeline, and calculate their SHA-256 hashes.
 
-### Generating Global Explanations
+### Sample Environment
 
-1.  Click the **"Generate Global Explanations"** button. This will calculate the SHAP values for a subset of your training data (to make the calculation efficient) and aggregate them to determine overall feature importance.
-2.  Once generated, you will see two outputs:
-    *   **Global Feature Importance Ranking**: A table showing features ranked by their average absolute SHAP value, indicating their overall importance.
-    *   **SHAP Global Summary Plot**: A visualization (typically a bar plot) that summarizes the impact of each feature on the model's output across the dataset. The length of the bar indicates the magnitude of the feature's influence.
+For this codelab, we recommend starting with the "Sample Environment". This pre-generates a dummy credit approval model (`Credit Approval Model v1.2`) and a synthetic validation dataset, allowing you to immediately dive into the explainability features without needing to prepare your own files.
 
-### Interpreting Global Explanations
+1.  Click the **"Load Sample Credit Model & Data"** button.
 
-The global SHAP explanation reveals the overall drivers of the Credit Approval Model. From the summary plot and the `global_importance_df`, you can clearly see which features, such as `credit_score` and `income`, are most influential in the model's decisions regarding loan approval. This high-level overview confirms that the model is largely relying on expected financial health indicators, which aligns with PrimeCredit Bank's lending criteria. This gives you initial confidence that the model's general behavior is sensible and explainable to senior stakeholders. However, global explanations only tell part of the story; you need to investigate specific individual decisions to ensure consistency and fairness.
+<aside class="positive">
+<b>Tip:</b> If you're running this locally, the application will create `credit_model_v1.2.pkl` and `credit_data_validation.csv` in your application directory. These are the files it uses for the sample environment.
+</aside>
 
-## 4. Deep Dive into Individual Decisions: Local Explanations for Specific Loan Applications
+Once the loading process completes, you will see:
+
+*   **Model SHA-256 Hash** and **Data SHA-256 Hash**: These unique identifiers confirm which exact versions of the model and data are being used.
+*   **Feature Data Preview**: This shows the first few rows of your data *after* it has been preprocessed by the model's pipeline, ready for predictions and explanations.
+*   **Raw Data Preview**: This displays the original, raw data with all features, including the target column and any categorical features, as they were before preprocessing.
+
+<aside class="info">
+The application handles the necessary data preprocessing (like converting categorical features to numerical ones) internally, mimicking how a real-world model pipeline would operate. This means you don't need to manually preprocess your data before uploading; the application's internal pipeline takes care of it.
+</aside>
+
+## 3. Understanding Global Model Behavior: Global Explanations
 Duration: 0:15
 
-While global explanations are useful, they don't explain why a *specific* loan applicant was approved or denied. As a Model Validator, you frequently encounter requests to understand individual decisions, especially for denied applications or those with unusual profiles. For PrimeCredit Bank, it's crucial to provide clear, defensible reasons to customers for loan denials or approvals. You will select a few representative cases from our `sample_credit_data` to generate local explanations using SHAP. This allows you to examine the contribution of each feature to that particular prediction.
+After loading your model and data, the next logical step is to understand what drives the model's decisions at a high level. **Global explanations** provide an aggregated view of how different features influence the model's predictions across the entire dataset.
 
-For a specific instance $x$, the SHAP values $\phi_i(f, x)$ quantify how much each feature $i$ contributes to the prediction $f(x)$ compared to the average prediction $\phi_0$. A positive SHAP value for a feature means it pushed the prediction higher (towards approval), while a negative value pushed it lower (towards denial).
+This application uses **SHAP (SHapley Additive exPlanations)** values for global interpretability. SHAP values attribute the prediction of an instance to each feature by calculating how much each feature contributes to pushing the prediction from the average prediction to the actual prediction.
 
-### Selecting Instances and Generating Explanations
+The fundamental equation for SHAP is:
+$$ \phi_0 + \sum_{i=1}^{M} \phi_i(f, x) = f(x) $$
+Here, $f(x)$ is the model's prediction for an instance $x$, $\phi_0$ is the average prediction (or baseline), and $\phi_i(f, x)$ represents the contribution of feature $i$ to the prediction for that specific instance. When we look at global explanations, we aggregate these contributions.
 
-1.  **Select Instances for Local Explanation**: You will see a table of the first few rows of your dataset. Use the multi-select box to choose up to 3 `Instance IDs` from the full dataset. The application will pre-suggest some instances, often including a denied, an approved, and a borderline case if available.
-2.  Click the **"Generate Local Explanations"** button. The application will calculate individual SHAP values for the selected instances.
+1.  Navigate to the "2. Global Explanations" page.
+2.  Click the **"Generate Global Explanations"** button. This will trigger the calculation of SHAP values for a sample of your training data (specifically the `X_train_exp` in the code, which is 80% of your preprocessed features), which is used as a background dataset for global explanations.
 
-### Interpreting Local Explanations
+Once the process is complete, you will see two key components:
 
-Once generated, you will see the **"Local Explanation Details"**. For each selected instance:
+### Top Features by Mean |SHAP| Value
 
-*   You can expand the section to view a JSON summary of the explanation, including the model's predicted probability for approval.
-*   A **SHAP Waterfall Plot** will be displayed. This plot visually shows how each feature contributes to pushing the instance's prediction from the base value (average prediction) to its final prediction.
-    *   Features shown in **red** are pushing the prediction *higher* (towards approval).
-    *   Features shown in **blue** are pushing the prediction *lower* (towards denial).
+This table lists the features that have the most significant average impact on the model's output, regardless of the direction (positive or negative). A higher mean absolute SHAP value indicates a more important feature for the model's overall decision-making.
 
-For instance, analyzing the waterfall plot for a *denied* application, you can clearly see that a low `credit_score` and high `debt_to_income` ratio were the primary negative contributors, pushing the loan approval probability below the threshold. Conversely, for an *approved* application, a high `credit_score` and `income` might be the dominant positive factors. For a *borderline* case, the contributions might be more balanced.
+### SHAP Summary Plot
 
-These detailed breakdowns are invaluable for Anya. They allow her to:
-1.  **Verify decision logic:** Are the model's specific reasons for a decision coherent and justifiable according to PrimeCredit's policy?
-2.  **Identify potential biases:** Do certain demographic features (if present) disproportionately influence decisions in specific cases without valid business rationale? (Note: no demographic features are in this sample data, but this is what a Model Validator would look for).
-3.  **Provide actionable feedback:** Understand what factors led to a denial, which is crucial for communicating with applicants.
+This is a powerful visualization that shows how each feature influences the model's output:
+*   **Vertical Axis**: Features are ordered by their importance (from top to bottom).
+*   **Horizontal Axis**: Represents the SHAP value for a given feature.
+*   **Color**: Indicates the feature value (e.g., red for high values, blue for low values).
+*   **Dots**: Each dot represents a single instance from the dataset.
 
-This level of detail is exactly what PrimeCredit's internal auditors and potentially regulators would require to validate the fairness and transparency of the model.
+By observing this plot, you can identify:
+*   Which features are most impactful.
+*   Whether high or low values of a feature tend to push the prediction higher or lower. For example, if "Income" is a top feature, and red dots (high income) are clustered on the positive SHAP side, it implies higher income generally increases the probability of approval.
 
-## 5. "What If?": Understanding Counterfactuals for Actionable Insights
-Duration: 0:10
-
-For a denied loan applicant, merely knowing *why* they were denied (via local explanations) isn't always enough. As Anya, you also need to understand 'what if?' – what minimal changes to their application would have resulted in an approval? This is where counterfactual explanations come in. They identify the smallest, most actionable changes to an applicant's features that would flip the model's decision from denial to approval. This information is invaluable for PrimeCredit Bank, not only for providing constructive feedback to customers but also for potentially refining our lending criteria or identifying areas where applicants can improve their financial standing to become eligible.
-
-The objective of generating a counterfactual example $x'$ for an original instance $x$ that results in a different prediction $y'$ is to minimize the distance between $x$ and $x'$, subject to the constraint that $x'$ belongs to the feasible input space $\mathcal{{X}}$ and the model $f$ predicts $y'$ for $x'$. This can be formalized as:
-
-$$ \min_{{x'}} \text{{distance}}(x, x') \quad \text{{s.t.}} \quad f(x') = y' \quad \text{{and}} \quad x' \in \mathcal{{X}} $$
-
-where $\text{{distance}}(x, x')$ is a measure of proximity (e.g., L1 or L2 norm), and $f(x')$ is the model's prediction for the counterfactual instance $x'$.
-
-### Generating Counterfactual Examples
-
-1.  **Select a Denied Instance for Counterfactual Generation**: The application will present a dropdown list of instances that were predicted as 'denied' (target = 0). Choose one of these instances.
-2.  Click the **"Generate Counterfactual Example"** button. The application will search for a counterfactual example, aiming to change the prediction to 'approved' (target = 1) with minimal changes.
-
-### Interpreting Counterfactual Analysis
-
-Once a counterfactual is found, you will see the **"Counterfactual Analysis"** section, which includes:
-
-*   **Original Instance:** The feature values of the initially denied application and its predicted approval probability.
-*   **Counterfactual Instance:** The modified feature values that would lead to an approval, along with its predicted approval probability.
-*   **Features Changed to Flip Prediction:** A list of features that were altered, along with their original and counterfactual values, and the magnitude of the change.
-
-The counterfactual analysis provides invaluable 'what-if' scenarios for PrimeCredit Bank. For the selected denied loan application, the `counterfactual_result` clearly shows what minimal changes to an applicant's profile (e.g., increasing the `credit_score` by a certain amount or raising the `income` significantly) would have resulted in the loan being approved.
-
-This empowers Anya to:
-1.  **Inform customers:** Instead of just saying 'your loan was denied,' PrimeCredit can advise applicants on specific, actionable steps (e.g., 'If your credit score improved by X points, you would likely be approved').
-2.  **Refine policy:** If generating counterfactuals consistently highlights specific features as critical for flipping decisions, it might indicate areas for policy review or for developing financial literacy programs for customers.
-3.  **Assess model sensitivity:** It reveals how sensitive the model is to changes in specific features, which is a key part of model validation.
-
-This concrete evidence of actionable insights is crucial for establishing trust and demonstrating the model's utility beyond just making a prediction.
-
-## 6. Identifying Gaps: Interpretability Analysis and Validation Findings
-Duration: 0:05
-
-After reviewing the global, local, and counterfactual explanations, Anya must now synthesize her findings and identify any interpretability gaps that could prevent the CAM v1.2 from being approved for deployment. This is a critical step for PrimeCredit Bank's risk management framework. An interpretability gap might be a feature that, while statistically significant, lacks a clear business rationale, or cases where local explanations seem inconsistent. You need to document your observations, evaluate the model's transparency, and make a recommendation for its deployment or further refinement.
-
-Your analysis will focus on:
-*   **Coherence with Policy:** Do the explanations align with PrimeCredit's established lending policies and regulations?
-*   **Transparency:** Are the reasons for decisions clear, concise, and easily understandable by non-technical stakeholders (e.g., loan officers, customers, auditors)?
-*   **Consistency:** Do similar cases receive similar explanations, and are there any anomalous explanations?
-*   **Actionability:** Do counterfactuals provide practical advice for applicants?
-
-Based on these, you will formulate a summary of your findings and a recommendation.
-
-### Generating the Validation Summary
-
-1.  Click the **"Generate Validation Summary"** button. This will compile a report based on the global, local, and counterfactual explanations you've generated so far.
-
-### Reviewing the Validation Summary Report
-
-The `explanation_summary.md` document captures Anya's comprehensive analysis. It consolidates findings from global importance, local decision breakdowns, and counterfactual scenarios. Crucially, it identifies specific 'interpretability gaps' – areas where explanations might be less straightforward or require further context – such as opaque feature interactions or explanations for borderline cases. For each gap, Anya has provided a pragmatic recommendation for PrimeCredit Bank, demonstrating a proactive approach to risk management.
-
-<aside class="negative">
-<b>Note on Hashes in Summary:</b> Due to the design of the internal functions, the model and data hashes displayed directly within this markdown summary (`explanation_summary.md`) are derived from the initial load of `sample_credit_model.pkl` and `sample_credit_data.csv` when the `source.py` module is first imported. For the <b>actual</b> audit-ready hashes of your dynamically uploaded model and data, please refer to the `config_snapshot.json` within the exported artifact bundle (next step).
+<aside class="info">
+The "positive class index" refers to the index in the model's output that corresponds to the "approved" class (or whatever is considered the positive outcome). For binary classification with classes 0 and 1, it's typically index 1.
 </aside>
 
-By clearly documenting these observations and providing a recommendation (in this case, approval with caveats), Anya fulfills her role as a Model Validator. This structured summary serves as a primary artifact for review by the Internal Audit team and senior leadership, enabling them to make an informed decision on the CAM v1.2's production readiness with a full understanding of its explainability profile.
+## 4. Investigating Individual Predictions: Local Explanations
+Duration: 0:15
 
-## 7. Audit Trail: Reproducibility and Artifact Bundling
+While global explanations provide an overall understanding, **local explanations** allow you to delve into the specific reasons behind an individual prediction. This is crucial for auditing specific loan applications or understanding why a particular customer was approved or denied.
+
+On the "3. Local Explanations" page, you can select up to 3 individual instances (loan applications) from your dataset to analyze in detail. The application will pre-select some interesting cases for you, such as a denied instance, an approved instance, and a borderline case, to demonstrate the diverse insights local explanations can offer.
+
+The SHAP values, introduced in the previous step, are even more insightful here. For a specific instance $x$, the SHAP values $\phi_i(f, x)$ quantify how much each feature $i$ contributes to the prediction $f(x)$ compared to the average prediction $\phi_0$. A positive SHAP value for a feature means it pushed the prediction higher (towards approval), while a negative value pushed it lower (towards denial).
+
+1.  Navigate to the "3. Local Explanations" page.
+2.  Use the multiselect box to **"Select up to 3 instance IDs to explain"**. You can use the default selections or choose your own.
+3.  Click the **"Generate Local Explanations"** button.
+
+For each selected instance, the application will display:
+
+### Prediction Probability and Status
+
+This metric clearly shows the model's predicted probability for the positive class (e.g., approval) and its corresponding decision (Approved/Denied, based on a 0.5 threshold).
+
+### Feature Values
+
+You'll see two tables:
+*   **Feature Values (Preprocessed for Model)**: These are the numerical values of the features *after* they have gone through the model's preprocessing steps. This is what the model directly "sees."
+*   **Raw Feature Values**: These are the original, human-readable values of the features for that instance. This helps you relate the preprocessed values back to the original data.
+
+### Contribution Waterfall Plot
+
+This powerful visualization breaks down the prediction for a single instance:
+*   **Base Value**: The average prediction across the entire dataset.
+*   **Feature Contributions**: Each bar shows how much a specific feature (and its value for this instance) increased or decreased the prediction from the Base Value. Red bars indicate features pushing the prediction higher (towards approval), while blue bars indicate features pushing it lower (towards denial).
+*   **f(x) (Model Output)**: The final prediction for this specific instance.
+
+By examining the waterfall plot, you can clearly see which features were the most influential in shaping the model's decision for that particular individual. For example, a low `CreditScore` (blue bar pushing left) might be a strong reason for a denial, while a high `Income` (red bar pushing right) might contribute to an approval.
+
+## 5. Providing Actionable Feedback: Counterfactual Analysis
+Duration: 0:10
+
+One of the most valuable aspects of explainability is providing actionable advice. **Counterfactual explanations** address the question: "What is the smallest change to an instance's features that would flip the model's prediction to a desired outcome?" For a denied loan applicant, this means identifying the minimal changes that would lead to an approval.
+
+The core idea is to find an alternative instance $x'$ that is very similar to the original instance $x$ but results in the desired prediction $y'$. Mathematically, this can be formulated as an optimization problem:
+
+$$ \min_{x'} \text{distance}(x, x') \quad \text{s.t.} \quad f(x') = y' \quad \text{and} \quad x' \in \mathcal{X} $$
+
+Here, $\text{distance}(x, x')$ measures how "far" the counterfactual $x'$ is from the original $x$ (representing the effort to make changes), $f(x')$ is the model's prediction for the counterfactual, $y'$ is the desired prediction (e.g., "approved"), and $x' \in \mathcal{X}$ ensures the counterfactual is a valid, realistic instance (e.g., age cannot be negative).
+
+This application uses the **DiCE (Diverse Counterfactual Explanations)** library to generate these insights.
+
+1.  Navigate to the "4. Counterfactuals" page.
+2.  The application will automatically identify instances that were *denied* by the model. Select one of these denied instance IDs from the dropdown menu.
+3.  Click the **"Generate Counterfactual Example"** button.
+
+<aside class="negative">
+<b>Warning:</b> If the `dice_ml` library is not installed in your environment, the application will provide a dummy counterfactual example. To generate real counterfactuals, ensure `dice_ml` is installed (`pip install dice_ml`).
+</aside>
+
+The results will show:
+
+### Original Instance (Denied - Raw Features)
+
+This table displays the raw, original feature values for the selected denied instance, giving you a clear picture of the applicant's profile.
+
+### Counterfactual Instance (Approved - Raw Features)
+
+This table presents the minimal changes suggested by DiCE that would have resulted in an approval. You'll see which features (e.g., `Income`, `CreditScore`, `LoanAmount`, `EmploymentType`) would need to be adjusted and to what values.
+
+### Actionable Feedback
+
+This concise summary highlights the specific changes required for the counterfactual. This text is crucial for providing direct, understandable guidance to applicants or for informing policy adjustments. For example, it might suggest: "To get approved, consider: increase Income by X; decrease LoanAmount by Y; change EmploymentType from 'Unemployed' to 'Salaried'."
+
+## 6. Synthesizing Findings: Validation Summary
 Duration: 0:05
 
-The final, critical step for Anya is to ensure that all her validation work is reproducible and securely bundled for auditing purposes. For PrimeCredit Bank, regulatory compliance demands an immutable record of all explanation artifacts, along with the configuration and hashes that guarantee their traceability to specific model and data versions. This 'audit-ready artifact bundle' acts as indisputable evidence of the model validation process. You will consolidate all generated explanations, configuration details, and an `evidence_manifest.json` containing SHA-256 hashes of each file, into a single, timestamped ZIP archive.
+After conducting your global, local, and counterfactual analyses, it's essential to synthesize these findings into a comprehensive **Validation & Interpretability Report**. This report serves as a formal record of your audit, providing a narrative summary of the model's behavior and the insights gained.
 
-The `evidence_manifest.json` will list each generated file and its corresponding SHA-256 hash. The SHA-256 hash function takes an input (e.g., a file's content) and produces a fixed-size, 256-bit (32-byte) hexadecimal string. Even a minuscule change to the input will result in a completely different hash, making it an excellent tool for verifying data integrity:
+1.  Navigate to the "5. Validation Summary" page.
+2.  Click the **"Generate Explanation Summary"** button.
+    <aside class="negative">
+    <b>Note:</b> You must have generated both Global and Local Explanations in the previous steps for the summary to be available. Counterfactuals are optional but recommended for a complete report.
+    </aside>
 
-$$ \text{{SHA-256}}(\text{{file\_content}}) = \text{{hexadecimal\_hash\_string}} $$
+The application will compile a markdown-formatted report containing:
 
-### Generating and Bundling Artifacts
+*   **Run ID, Date, Model Hash, Data Hash**: Essential metadata for traceability.
+*   **Global Feature Importance**: A summary of the top features influencing the model overall, typically including a table of mean absolute SHAP values.
+*   **Local Instance Explanations**: Details for each instance you selected for local analysis, including its predicted probability, decision, key feature contributions (SHAP values), and a note about the accompanying waterfall plot image.
+*   **Counterfactual Analysis**: If generated, this section will detail the original denied instance, its counterfactual (approved) counterpart, and the actionable feedback.
 
-1.  Click the **"Generate & Bundle All Audit Artifacts"** button. This will perform the following actions:
-    *   Create a `config_snapshot.json` containing the model hash, data hash, and random seed used.
-    *   Create an `evidence_manifest.json` which lists all generated explanation files (global, local, counterfactual, summary, and config snapshot) along with their individual SHA-256 hashes.
-    *   Compress all these files into a single, timestamped ZIP archive.
+Review the generated summary report on this page. This report is a crucial deliverable for regulatory bodies or internal stakeholders.
 
-### Downloading the Audit-Ready Artifact Bundle
+## 7. Securing Your Evidence: Exporting Audit Artifacts
+Duration: 0:05
 
-Once the bundling process is complete, you will see a **"Download Audit-Ready Artifact Bundle"** button. Click this button to download the ZIP file to your local machine.
+The final step in your validation workflow is to create a secure, auditable package of all your findings. This **Audit-Ready Bundle (.zip)** ensures that all evidence, configuration snapshots, and explanation reports are cryptographically signed and stored together for future reference and compliance checks.
 
-The final stage of the validation workflow is complete. You have successfully generated a comprehensive set of explanation artifacts, including global and local SHAP analyses, counterfactual examples, and your detailed summary report. Each of these documents, along with a snapshot of the configuration (including model and data hashes) and a manifest of all files with their individual SHA-256 hashes, has been meticulously bundled into a timestamped ZIP archive.
+The integrity of this bundle is assured by using **SHA-256 hashes**:
 
-This single, self-contained archive is PrimeCredit Bank's **audit-ready artifact bundle**. It ensures:
-1.  **Reproducibility:** The `config_snapshot.json` captures all parameters needed to regenerate these explanations, including the exact model and data hashes.
-2.  **Traceability:** The `evidence_manifest.json` provides cryptographic proof of the integrity and origin of each artifact, linking them directly to the validated model and data versions.
-3.  **Compliance:** All necessary documentation for internal auditors, regulators, and senior stakeholders is readily available and verifiable, significantly reducing regulatory risk and building trust in the AI system.
+$$ \text{SHA-256}(\text{file\_content}) = \text{hexadecimal\_hash\_string} $$
 
-This completes your model validation task for CAM v1.2, providing PrimeCredit Bank with the necessary confidence to proceed with its deployment, knowing its decisions are explainable, transparent, and auditable.
+This means that any alteration to the files within the bundle would result in a different hash, making tampering immediately detectable.
+
+1.  Navigate to the "6. Export Artifacts" page.
+2.  Click the **"Export Audit-Ready Bundle (.zip)"** button.
+    <aside class="negative">
+    <b>Note:</b> This button will only be enabled after you have successfully generated the "Validation Summary" in the previous step.
+    </aside>
+
+The application will perform the following actions:
+
+*   **Create Config Snapshot**: A JSON file containing the model hash, data hash, random seed used, and a timestamp. This captures the exact environment of your validation run.
+*   **Create Evidence Manifest**: A JSON file listing all generated explanation files (global, local, counterfactual JSONs, local SHAP waterfall plots, the summary report, and the config snapshot) along with their individual SHA-256 hashes. This manifest acts as a table of contents and integrity checker for your audit package.
+*   **Bundle to ZIP**: All these files (explanation JSONs, plots, summary markdown, config snapshot, and the manifest) will be compressed into a single ZIP archive.
+
+Once complete, you will see a success message indicating the manifest and ZIP archive have been created. You will then be provided with a **"Download Audit Bundle (.zip)"** button. Click this button to download your complete audit package.
+
+This `.zip` file represents a comprehensive, traceable record of your model validation, ready for submission or archival.
+
+Congratulations! You have successfully completed the validation workflow using the QuLab: Model Interpretability & Explainability Control Workbench.
