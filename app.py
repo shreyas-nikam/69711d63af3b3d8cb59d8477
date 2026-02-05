@@ -183,17 +183,18 @@ def load_sample_credit_data(seed: int = DEFAULT_SEED, n: int = 2500) -> Tuple[pd
         "payment_to_income": payment_to_income,
     })
 
-    # Ground-truth-ish logistic risk function
+    # Ground-truth-ish logistic risk function (adjusted for more balanced classes)
     z = (
-        -3.2
-        + 0.0035 * (700 - credit_score)
-        + 1.8 * dti
-        + 0.9 * payment_to_income
-        + 0.11 * num_delinquencies
-        + 0.02 * (interest_rate - 10.0)
-        + 0.0005 * (loan_amount * 1000.0 - 15000.0) / 1000.0
-        - 0.03 * employment_years
-        - 0.004 * (income - 60.0)
+        -1.5  # Adjusted intercept for ~25% default rate
+        + 0.008 * (700 - credit_score)  # Stronger credit score impact
+        + 3.5 * dti  # Stronger DTI impact
+        + 2.0 * payment_to_income  # Stronger payment burden impact
+        + 0.25 * num_delinquencies  # Stronger delinquency impact
+        + 0.05 * (interest_rate - 10.0)  # Stronger interest rate impact
+        + 0.002 * (loan_amount * 1000.0 - 15000.0) /
+        1000.0  # Stronger loan amount impact
+        - 0.06 * employment_years  # Stronger employment stability impact
+        - 0.01 * (income - 60.0)  # Stronger income impact
     )
     p = 1.0 / (1.0 + np.exp(-z))
     y = (rng.random(n) < p).astype(int)
@@ -696,7 +697,7 @@ def sidebar_controls(models: Dict[str, Any]):
         [
             "0) Mission Brief",
             "1) Persona Story",
-            "2) Data & Model (Backend Loaded)",
+            "2) Data & Model ",
             "3) Global Explanation (SHAP / Permutation)",
             "4) Local Explanation (SHAP)",
             "5) Local Explanation (LIME)",
@@ -826,7 +827,7 @@ Export all artifacts, with SHA-256 hashes, into `reports/session05/<run_id>/`.
 
 
 def data_model_page(X: pd.DataFrame, y: pd.Series, models: Dict[str, Any], ctx: RunContext):
-    st.header("2) Data & Model (Backend Loaded)")
+    st.header("2) Data & Model ")
     st.markdown(
         """
 This lab uses **backend-loaded sample data and baseline models**. No uploads are required.
@@ -868,9 +869,47 @@ Decision rule used throughout the app:
     metrics = evaluate_model(m, X_test, y_test)
     st.metric("ROC-AUC (test)", f"{metrics['roc_auc']:.3f}")
     st.markdown("**Confusion matrix (threshold=0.5)**")
-    st.write(metrics["confusion_matrix"])
+    cm = metrics["confusion_matrix"]
+    cm_df = pd.DataFrame(cm,
+                         columns=["Predicted: No Default",
+                                  "Predicted: Default"],
+                         index=["Actual: No Default", "Actual: Default"])
+    st.dataframe(cm_df, use_container_width=True)
+
+    st.markdown("""
+    **📊 Understanding the Confusion Matrix:**
+    - **Top-left (True Negative)**: Correctly predicted as no default
+    - **Top-right (False Positive)**: Incorrectly predicted as default (Type I error)
+    - **Bottom-left (False Negative)**: Incorrectly predicted as no default (Type II error)
+    - **Bottom-right (True Positive)**: Correctly predicted as default
+    
+    In credit risk: False Negatives are costly (lending to defaulters), while False Positives mean lost business opportunities.
+    """)
+
     with st.expander("Classification report"):
-        st.json(metrics["classification_report"])
+        report = metrics["classification_report"]
+        report_data = []
+        for label, values in report.items():
+            if isinstance(values, dict):
+                report_data.append({
+                    "Class": label,
+                    "Precision": f"{values.get('precision', 0):.3f}",
+                    "Recall": f"{values.get('recall', 0):.3f}",
+                    "F1-Score": f"{values.get('f1-score', 0):.3f}",
+                    "Support": int(values.get('support', 0))
+                })
+        st.dataframe(pd.DataFrame(report_data), use_container_width=True)
+
+        st.markdown("""
+        **📊 Understanding the Classification Report:**
+        - **Precision**: Of all predicted defaults, what % were actual defaults? (Relevance)
+        - **Recall**: Of all actual defaults, what % did we catch? (Sensitivity)
+        - **F1-Score**: Harmonic mean of precision and recall (balanced metric)
+        - **Support**: Number of actual occurrences in the test set
+        - **Accuracy**: Overall correct predictions
+        - **Macro avg**: Unweighted mean (treats all classes equally)
+        - **Weighted avg**: Weighted by support (accounts for class imbalance)
+        """)
 
 
 def global_explanation_page(X: pd.DataFrame, y: pd.Series, models: Dict[str, Any], ctx: RunContext):
@@ -896,15 +935,38 @@ In this lab:
             m, X_bg=X_bg, X_sample=X_sample, family=fam)
         st.success(f"Method used: **SHAP ({meta['explainer']})**")
         st.caption(f"Sample size: {len(X_sample)}")
+        st.dataframe(imp_df.head(15), use_container_width=True)
         fig = shap_summary_plot(imp_df.head(
             15), title="Mean |SHAP| feature importance (top 15)")
         st.pyplot(fig, clear_figure=True)
+
+        st.markdown("""
+        **📊 Understanding Global SHAP Values:**
+        - **Mean |SHAP|**: Average absolute impact of each feature across all predictions
+        - **Higher values** = feature has stronger influence on model predictions
+        - SHAP values are **additive**: sum of all contributions + base value = predicted risk
+        - **TreeExplainer**: Fast, exact method for tree-based models
+        - **LinearExplainer**: Efficient method for linear models with feature interactions
+        
+        💡 **Validation insight**: Top features should align with domain knowledge. Unexpected drivers warrant investigation.
+        """)
     else:
         imp_df = compute_permutation_importance(
             m, X_sample, y.loc[X_sample.index], seed=ctx.seed, n_repeats=7)
         st.warning(
             "Using fallback: **Permutation importance** (expected for black-box models or when SHAP is missing).")
         st.dataframe(imp_df.head(15), use_container_width=True)
+
+        st.markdown("""
+        **📊 Understanding Permutation Importance:**
+        - **Importance mean**: Average drop in model performance (ROC-AUC) when feature is randomly shuffled
+        - **Importance std**: Variability across multiple shuffles (lower = more stable)
+        - **Higher values** = feature is more critical to model accuracy
+        - Works for **any model** but can be slower than SHAP for tree models
+        - Measures **global importance** but doesn't show direction of effect
+        
+        💡 **Validation insight**: High standard deviation suggests feature importance may be unstable or context-dependent.
+        """)
 
     st.subheader("Stability check (repeatability)")
     st.markdown(
@@ -995,12 +1057,21 @@ Note: In this app, SHAP local explanations are enabled for the **tree** and **li
 
     st.markdown(
         """
-#### How to read this (auditor-friendly)
+#### 📊 Understanding Local SHAP Explanations
 
-- **Positive contribution** → increases predicted default risk (pushes toward DENY)  
-- **Negative contribution** → decreases predicted default risk (pushes toward APPROVE)  
-- The **base value** is the model’s expected output; contributions explain deviation for this case.
-"""
+**How to read this (auditor-friendly):**
+- **Base value** ({:.3f}): Model's average prediction across all cases (starting point)
+- **Positive contribution** (+): Increases predicted default risk → pushes toward DENY
+- **Negative contribution** (−): Decreases predicted default risk → pushes toward APPROVE
+- **Final prediction**: Base value + sum of all contributions = {:.3f}
+- **Waterfall plot**: Shows cumulative effect as each feature is added
+
+💡 **Validation insight**: Check if top contributors align with business logic. For example:
+- Lower credit_score should push toward DENY (positive contribution)
+- Higher income should push toward APPROVE (negative contribution)
+- High DTI (debt-to-income) should push toward DENY
+
+🔍 **Explainability check**: Can you explain this decision to a loan applicant or regulator?"""
     )
 
 
@@ -1049,14 +1120,30 @@ Why it matters in an enterprise workbench:
         st.success("LIME explanation generated.")
 
         st.markdown("#### Explanation (list form)")
-        st.write(pd.DataFrame(lime_obj["as_list"], columns=[
-                 "condition", "weight"]).sort_values("weight", ascending=False))
+        lime_df = pd.DataFrame(lime_obj["as_list"], columns=[
+            "condition", "weight"]).sort_values("weight", ascending=False)
+        st.dataframe(lime_df, use_container_width=True)
 
         st.markdown("#### Explanation (HTML)")
         st.components.v1.html(lime_obj["as_html"], height=500, scrolling=True)
 
-        st.caption(
-            "Positive weights push toward 'default'; negative weights push away (local approximation).")
+        st.markdown("""
+        **📊 Understanding LIME Explanations:**
+        - **LIME** = Local Interpretable Model-agnostic Explanations
+        - Creates a **local surrogate** (simple) model around this specific prediction
+        - **Condition**: Feature value range (LIME discretizes continuous features)
+        - **Weight**: Impact on prediction
+          - **Positive weight** → pushes toward 'default' (class 1)
+          - **Negative weight** → pushes toward 'no default' (class 0)
+        - **Model-agnostic**: Works with any black-box classifier
+        
+        💡 **LIME vs SHAP:**
+        - LIME: Approximates locally, faster for complex models, may vary between runs
+        - SHAP: Theoretically grounded, consistent, but can be slower
+        - Use both as **cross-validation** for critical decisions
+        
+        ⚠️ **Validation note**: LIME uses random sampling, so explanations may vary slightly between runs even with fixed seed.
+        """)
 
 
 def counterfactual_page(X: pd.DataFrame, y: pd.Series, models: Dict[str, Any], ctx: RunContext):
@@ -1116,16 +1203,53 @@ It prefers “risk-reducing” directions (e.g., increase credit score, decrease
             )
 
         st.subheader("Counterfactual result")
-        st.json(cf)
+
+        # Display status and risk change prominently
+        col1, col2, col3 = st.columns([1, 1, 1])
+        col1.metric("Status", cf["status"].replace("_", " ").title())
+        col2.metric("Initial Risk", f"{cf['p_default_start']:.3f}")
+        col3.metric("Final Risk", f"{cf['p_default_end']:.3f}",
+                    delta=f"{cf['p_default_end'] - cf['p_default_start']:.3f}")
 
         st.markdown("**Changes applied**")
         if cf["changes"]:
-            st.write(pd.DataFrame(
-                [{"feature": k, "from": v["from"], "to": v["to"]}
+            changes_df = pd.DataFrame(
+                [{"Feature": k, "Original Value": f"{v['from']:.2f}", "Counterfactual Value": f"{v['to']:.2f}",
+                  "Change": f"{v['to'] - v['from']:.2f}"}
                     for k, v in cf["changes"].items()]
-            ))
+            )
+            st.dataframe(changes_df, use_container_width=True)
         else:
-            st.write("No feature changes found.")
+            st.info("No feature changes needed or found.")
+
+        # Show full counterfactual row
+        with st.expander("View complete counterfactual profile"):
+            cf_df = pd.DataFrame([cf["counterfactual_row"]])
+            st.dataframe(cf_df.T.rename(
+                columns={0: "value"}), use_container_width=True)
+
+        st.markdown("""
+        **📊 Understanding Counterfactual Explanations:**
+        - **Purpose**: Shows the **minimal changes** needed to flip the decision
+        - **Status meanings**:
+          - `already_approved`: Current risk below threshold, no changes needed
+          - `flipped`: Successfully found changes that reduce risk below threshold
+          - `not_flipped`: Could not find changes within constraints/max steps
+        
+        💡 **Business value**:
+        - **Actionable feedback** for applicants: "If you increase your credit score by 50 points..."
+        - **Recourse**: Shows if decision can be changed with realistic actions
+        - **Fairness check**: Are the required changes reasonable and achievable?
+        
+        ⚠️ **Validation considerations**:
+        - Are suggested changes **realistic**? (e.g., can't instantly change employment years)
+        - Are changes **consistent with constraints**? (credit score increases, DTI decreases)
+        - Is the minimal change **economically feasible** for the applicant?
+        - Does the counterfactual respect **causal relationships**? (income affects payment capacity)
+        
+        🔍 **Algorithmic note**: This uses a greedy search with feature ranking from SHAP/permutation importance.
+        More sophisticated methods (e.g., DICE, Wachter) can find diverse or optimal counterfactuals.
+        """)
 
 
 def reproducibility_page(X: pd.DataFrame, y: pd.Series, models: Dict[str, Any], ctx: RunContext):
@@ -1163,7 +1287,29 @@ This page previews:
         "model_sha256": model_hash,
         "dataset_sha256": dataset_hash,
     }
-    st.code(pretty_json(config_preview), language="json")
+    config_df = pd.DataFrame([
+        {"Configuration Item": k, "Value": str(v)}
+        for k, v in config_preview.items()
+    ])
+    st.dataframe(config_df, use_container_width=True)
+
+    with st.expander("View as JSON"):
+        st.code(pretty_json(config_preview), language="json")
+
+    st.markdown("""
+    **📊 Understanding Reproducibility Controls:**
+    - **run_id**: Unique identifier for this explanation session
+    - **seed**: Random seed ensuring deterministic results (same inputs → same outputs)
+    - **model_sha256**: Cryptographic hash of model parameters (detects any model changes)
+    - **dataset_sha256**: Hash of training data (ensures data integrity)
+    - **threshold**: Decision boundary used for approve/deny
+    
+    💡 **Why this matters for enterprise AI:**
+    - **Auditability**: Can reproduce exact explanations months/years later
+    - **Version control**: Detect if model or data changed between runs
+    - **Regulatory compliance**: Demonstrate consistent, documented decision process
+    - **Debugging**: Isolate whether issues stem from model, data, or configuration changes
+    """)
 
 
 def export_page(X: pd.DataFrame, y: pd.Series, models: Dict[str, Any], ctx: RunContext):
