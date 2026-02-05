@@ -1,669 +1,1429 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import os
-import zipfile
-import datetime
-import io
-import matplotlib.pyplot as plt
-import shap
+from sklearn.inspection import permutation_importance
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score, confusion_matrix, classification_report
 from sklearn.model_selection import train_test_split
-from source import *
+import matplotlib.pyplot as plt
+import io
+import json
+import os
+import random
+import string
+import zipfile
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Dict, Any, Tuple, Optional, List
 
-# Page Configuration
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+import matplotlib
+matplotlib.use("Agg")
+
+
+# Optional-but-required-by-lab libs
+try:
+    import shap
+    _HAS_SHAP = True
+except Exception:
+    shap = None
+    _HAS_SHAP = False
+
+try:
+    from lime.lime_tabular import LimeTabularExplainer
+    _HAS_LIME = True
+except Exception:
+    LimeTabularExplainer = None
+    _HAS_LIME = False
+
+
+# ---------------------------
+# Page config
+# ---------------------------
 st.set_page_config(
-    page_title="QuLab: Lab 5: Interpretability & Explainability Control Workbench", layout="wide")
-st.sidebar.image("https://www.quantuniversity.com/assets/img/logo5.jpg")
-st.sidebar.divider()
+    page_title="QuLab: Lab 5: Interpretability & Explainability Control Workbench",
+    layout="wide",
+)
+
+# ---------------------------
+# Constants
+# ---------------------------
+DEFAULT_SEED = 42
+REPORTS_ROOT = os.path.join("reports", "session05")
+APP_VERSION = "2.0"
+COURSE = "AI Design & Deployment Risks (Spring 2026)"
+SESSION = "5 — Interpretability & Explainability Controls"
+
+PERSONA_NAME = "Maya Patel"
+PERSONA_ROLE = "Model Validator"
+ORG_NAME = "QuantaBank (Fictional)"
+
+
+# ---------------------------
+# Utilities
+# ---------------------------
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _random_run_id(prefix: str = "run") -> str:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    suf = "".join(random.choice(string.ascii_lowercase + string.digits)
+                  for _ in range(6))
+    return f"{prefix}_{stamp}_{suf}"
+
+
+def set_seeds(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def sha256_bytes(b: bytes) -> str:
+    h = hashlib.sha256()
+    h.update(b)
+    return h.hexdigest()
+
+
+def sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def df_sha256(df: pd.DataFrame) -> str:
+    b = df.to_csv(index=False).encode("utf-8")
+    return sha256_bytes(b)
+
+
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def pretty_json(obj: Any) -> str:
+    return json.dumps(obj, indent=2, sort_keys=True)
+
+
+def model_family(model: Any) -> str:
+    """Coarse model family for method selection logic."""
+    if isinstance(model, RandomForestClassifier):
+        return "tree"
+    if isinstance(model, LogisticRegression):
+        return "linear"
+    # Fallback heuristic for other sklearn estimators
+    name = model.__class__.__name__.lower()
+    if "forest" in name or "tree" in name or "gb" in name:
+        return "tree"
+    if "logistic" in name or "linear" in name:
+        return "linear"
+    return "blackbox"
+
+
+def decision_label(default_prob: float, threshold: float) -> str:
+    return "DENY" if default_prob >= threshold else "APPROVE"
+
+
+def safe_float(x: Any) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return float("nan")
+
+
+# ---------------------------
+# Sample data + baseline models (backend-loaded)
+# ---------------------------
+@st.cache_data(show_spinner=False)
+def load_sample_credit_data(seed: int = DEFAULT_SEED, n: int = 2500) -> Tuple[pd.DataFrame, pd.Series]:
+    """
+    Deterministic, backend-generated credit dataset.
+    Target y=1 means 'default risk' (bad outcome). Lower predicted risk => better.
+    """
+    rng = np.random.default_rng(seed)
+
+    # Core applicant attributes
+    age = rng.integers(21, 70, size=n)
+    income = rng.lognormal(mean=10.5, sigma=0.35, size=n) / \
+        1000.0  # ~ (20k..200k) in $k
+    employment_years = np.clip(rng.normal(
+        loc=(age - 18) / 6.0, scale=2.0, size=n), 0, 40)
+
+    credit_score = np.clip(rng.normal(loc=680, scale=55, size=n), 300, 850)
+    num_delinquencies = np.clip(rng.poisson(lam=0.6, size=n), 0, 12)
+
+    # Loan attributes
+    loan_amount = rng.lognormal(
+        mean=10.1, sigma=0.55, size=n) / 1000.0  # in $k
+    loan_term_months = rng.choice([12, 24, 36, 48, 60], size=n, p=[
+                                  0.12, 0.18, 0.30, 0.20, 0.20])
+    interest_rate = np.clip(rng.normal(
+        loc=12.0, scale=4.0, size=n), 3.0, 30.0)  # %
+    dti = np.clip(rng.normal(loc=0.28, scale=0.12, size=n),
+                  0.0, 1.5)  # debt-to-income
+
+    # Simple engineered features (still interpretable)
+    monthly_payment_proxy = (loan_amount * 1000.0) * \
+        (interest_rate / 100.0) / np.maximum(loan_term_months, 1)
+    payment_to_income = monthly_payment_proxy / \
+        np.maximum(income * 1000.0 / 12.0, 1.0)
+
+    X = pd.DataFrame({
+        "age": age.astype(int),
+        "income_k": income,
+        "employment_years": employment_years,
+        "credit_score": credit_score,
+        "num_delinquencies": num_delinquencies.astype(int),
+        "loan_amount_k": loan_amount,
+        "loan_term_months": loan_term_months.astype(int),
+        "interest_rate_pct": interest_rate,
+        "dti": dti,
+        "payment_to_income": payment_to_income,
+    })
+
+    # Ground-truth-ish logistic risk function
+    z = (
+        -3.2
+        + 0.0035 * (700 - credit_score)
+        + 1.8 * dti
+        + 0.9 * payment_to_income
+        + 0.11 * num_delinquencies
+        + 0.02 * (interest_rate - 10.0)
+        + 0.0005 * (loan_amount * 1000.0 - 15000.0) / 1000.0
+        - 0.03 * employment_years
+        - 0.004 * (income - 60.0)
+    )
+    p = 1.0 / (1.0 + np.exp(-z))
+    y = (rng.random(n) < p).astype(int)
+
+    return X, pd.Series(y, name="default_risk")
+
+
+@st.cache_resource(show_spinner=False)
+def train_baseline_models(X: pd.DataFrame, y: pd.Series, seed: int = DEFAULT_SEED) -> Dict[str, Any]:
+    set_seeds(seed)
+    models: Dict[str, Any] = {}
+
+    lr = LogisticRegression(
+        max_iter=2000,
+        solver="liblinear",
+        random_state=seed,
+    )
+    lr.fit(X, y)
+    models["Interpretable (Logistic Regression)"] = lr
+
+    rf = RandomForestClassifier(
+        n_estimators=250,
+        max_depth=6,
+        min_samples_leaf=20,
+        random_state=seed,
+        n_jobs=-1,
+    )
+    rf.fit(X, y)
+    models["Black-box (Random Forest)"] = rf
+
+    return models
+
+
+def evaluate_model(model: Any, X: pd.DataFrame, y: pd.Series) -> Dict[str, Any]:
+    proba = model.predict_proba(X)[:, 1]
+    auc = roc_auc_score(y, proba)
+    pred = (proba >= 0.5).astype(int)
+    cm = confusion_matrix(y, pred).tolist()
+    report = classification_report(y, pred, output_dict=True)
+    return {"roc_auc": float(auc), "confusion_matrix": cm, "classification_report": report}
+
+
+# ---------------------------
+# Explainability engines
+# ---------------------------
+def compute_permutation_importance(
+    model: Any,
+    X: pd.DataFrame,
+    y: pd.Series,
+    seed: int,
+    n_repeats: int = 5,
+) -> pd.DataFrame:
+    set_seeds(seed)
+    r = permutation_importance(
+        model, X, y,
+        n_repeats=n_repeats,
+        random_state=seed,
+        scoring="roc_auc",
+        n_jobs=-1,
+    )
+    imp = pd.DataFrame({
+        "feature": X.columns,
+        "importance_mean": r.importances_mean,
+        "importance_std": r.importances_std,
+    }).sort_values("importance_mean", ascending=False).reset_index(drop=True)
+    return imp
+
+
+def _shap_to_2d_positive_class(sv) -> np.ndarray:
+    """
+    Normalize SHAP outputs across versions into a 2D array: (n_samples, n_features),
+    selecting the positive class for binary classification when needed.
+    """
+    # Case 1: list of arrays (one per class)
+    if isinstance(sv, list):
+        arr = sv[1] if len(sv) > 1 else sv[0]
+        return np.asarray(arr)
+
+    # Case 2: shap.Explanation object
+    if hasattr(sv, "values"):
+        sv = sv.values
+
+    arr = np.asarray(sv)
+
+    # Case 3: 3D array (n_samples, n_features, n_outputs)
+    if arr.ndim == 3:
+        k = 1 if arr.shape[2] > 1 else 0
+        arr = arr[:, :, k]
+
+    return arr
+
+
+def compute_shap_global(
+    model: Any,
+    X_bg: pd.DataFrame,
+    X_sample: pd.DataFrame,
+    family: str,
+) -> Tuple[pd.DataFrame, Any]:
+    if not _HAS_SHAP:
+        raise RuntimeError("SHAP is not installed.")
+
+    if family == "tree":
+        explainer = shap.TreeExplainer(model)
+        sv = explainer.shap_values(X_sample)
+        sv2d = _shap_to_2d_positive_class(sv)
+        mean_abs = np.abs(sv2d).mean(axis=0).ravel()
+
+        imp = pd.DataFrame({
+            "feature": list(X_sample.columns),
+            "mean_abs_shap": mean_abs
+        }).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
+
+        return imp, {"explainer": "TreeExplainer"}
+
+    if family == "linear":
+        explainer = shap.LinearExplainer(
+            model, X_bg, feature_perturbation="interventional")
+        sv = explainer.shap_values(X_sample)
+        sv2d = _shap_to_2d_positive_class(sv)
+        mean_abs = np.abs(sv2d).mean(axis=0).ravel()
+
+        imp = pd.DataFrame({
+            "feature": list(X_sample.columns),
+            "mean_abs_shap": mean_abs
+        }).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
+
+        return imp, {"explainer": "LinearExplainer"}
+
+    raise RuntimeError(
+        "SHAP global explanations are enabled only for tree/linear baseline models in this lab.")
+
+
+def compute_shap_local(
+    model: Any,
+    X_bg: pd.DataFrame,
+    x_row: pd.DataFrame,
+    family: str,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    if not _HAS_SHAP:
+        raise RuntimeError("SHAP is not installed.")
+
+    if family == "tree":
+        explainer = shap.TreeExplainer(model)
+        sv = explainer.shap_values(x_row)
+        sv2d = _shap_to_2d_positive_class(sv)
+        contrib = sv2d[0]
+
+        base = explainer.expected_value
+        if isinstance(base, (list, np.ndarray)):
+            base = base[1] if len(base) > 1 else base[0]
+
+    elif family == "linear":
+        explainer = shap.LinearExplainer(
+            model, X_bg, feature_perturbation="interventional")
+        sv = explainer.shap_values(x_row)
+        sv2d = _shap_to_2d_positive_class(sv)
+        contrib = sv2d[0]
+
+        base = explainer.expected_value
+        if isinstance(base, (list, np.ndarray)):
+            base = base[1] if len(base) > 1 else base[0]
+
+    else:
+        raise RuntimeError(
+            "SHAP local explanations are enabled only for tree/linear baseline models in this lab.")
+
+    df = pd.DataFrame({
+        "feature": list(x_row.columns),
+        "value": x_row.iloc[0].values,
+        "shap_contribution": contrib,
+        "abs_contribution": np.abs(contrib),
+    }).sort_values("abs_contribution", ascending=False).reset_index(drop=True)
+
+    meta = {"base_value": safe_float(
+        base), "explainer": explainer.__class__.__name__}
+    return df, meta
+
+
+def shap_summary_plot(imp_df: pd.DataFrame, title: str) -> plt.Figure:
+    fig = plt.figure(figsize=(7, 4))
+    plt.barh(imp_df["feature"][::-1], imp_df.iloc[::-1, 1])
+    plt.title(title)
+    plt.xlabel(imp_df.columns[1])
+    plt.tight_layout()
+    return fig
+
+
+def shap_local_waterfall_plot(local_df: pd.DataFrame, base_value: float, title: str) -> plt.Figure:
+    if not _HAS_SHAP:
+        raise RuntimeError("SHAP is not installed.")
+    values = local_df["shap_contribution"].values
+    data = local_df["value"].values
+    feature_names = local_df["feature"].tolist()
+
+    exp = shap.Explanation(values=values, base_values=base_value,
+                           data=data, feature_names=feature_names)
+    fig = plt.figure(figsize=(9, 4))
+    shap.plots.waterfall(exp, max_display=12, show=False)
+    plt.title(title)
+    plt.tight_layout()
+    return fig
+
+
+def lime_local_explanation(
+    model: Any,
+    X_train: pd.DataFrame,
+    x_row: pd.DataFrame,
+    class_names: List[str],
+    seed: int,
+    num_features: int = 10,
+) -> Dict[str, Any]:
+    if not _HAS_LIME:
+        raise RuntimeError("LIME is not installed.")
+    set_seeds(seed)
+
+    explainer = LimeTabularExplainer(
+        training_data=X_train.values,
+        feature_names=X_train.columns.tolist(),
+        class_names=class_names,
+        mode="classification",
+        discretize_continuous=True,
+        random_state=seed,
+    )
+
+    exp = explainer.explain_instance(
+        data_row=x_row.iloc[0].values,
+        predict_fn=model.predict_proba,
+        num_features=num_features,
+        top_labels=2,   # <-- ensure both labels are available when binary
+    )
+
+    # --- Choose a label safely ---
+    available_labels = sorted(list(exp.local_exp.keys()))
+    # Prefer "default" label index 1 if it exists, else fall back to first available
+    label_to_use = 1 if 1 in exp.local_exp else available_labels[0]
+
+    return {
+        "label_used": int(label_to_use),
+        "available_labels": available_labels,
+        "as_list": exp.as_list(label=label_to_use),
+        "as_html": exp.as_html(),
+        "score": safe_float(getattr(exp, "score", np.nan)),
+        "local_pred": exp.local_pred.tolist() if hasattr(exp, "local_pred") else None,
+        "intercept": (
+            safe_float(exp.intercept[label_to_use])
+            if hasattr(exp, "intercept") and isinstance(exp.intercept, (list, np.ndarray, dict))
+            else None
+        ),
+    }
+
+
+# ---------------------------
+# Counterfactual (basic)
+# ---------------------------
+CF_PREFERENCES = {
+    "credit_score": "increase",
+    "income_k": "increase",
+    "employment_years": "increase",
+    "dti": "decrease",
+    "payment_to_income": "decrease",
+    "num_delinquencies": "decrease",
+    "loan_amount_k": "decrease",
+    "interest_rate_pct": "decrease",
+}
+
+
+def generate_counterfactual_greedy(
+    model: Any,
+    X_ref: pd.DataFrame,
+    x0: pd.DataFrame,
+    threshold: float,
+    local_ranked_features: List[str],
+    max_steps: int = 6,
+    candidate_quantiles: Tuple[float, ...] = (0.1, 0.25, 0.5, 0.75, 0.9),
+) -> Dict[str, Any]:
+    """
+    Greedy, constraint-aware counterfactual:
+    - iteratively tweaks one feature at a time to reduce predicted default risk,
+      until it crosses the approval threshold (risk < threshold) or max_steps reached.
+    """
+    x = x0.copy()
+    p0 = model.predict_proba(x)[:, 1][0]
+    if p0 < threshold:
+        return {
+            "status": "already_approved",
+            "p_default_start": float(p0),
+            "p_default_end": float(p0),
+            "changes": {},
+            "counterfactual_row": x.to_dict(orient="records")[0],
+        }
+
+    changes = {}
+    best_p = p0
+
+    for _step in range(max_steps):
+        best_candidate = None
+
+        for feat in local_ranked_features[:8]:
+            if feat not in X_ref.columns:
+                continue
+
+            pref = CF_PREFERENCES.get(feat, None)
+            qs = np.quantile(X_ref[feat].values, candidate_quantiles)
+
+            current = float(x.iloc[0][feat])
+            candidates = []
+            for v in qs:
+                v = float(v)
+                if pref == "increase" and v <= current:
+                    continue
+                if pref == "decrease" and v >= current:
+                    continue
+                candidates.append(v)
+
+            if not candidates:
+                candidates = [float(qs[0]), float(qs[-1])]
+
+            for v in candidates:
+                x_try = x.copy()
+                x_try.iloc[0, x_try.columns.get_loc(feat)] = v
+                p_try = float(model.predict_proba(x_try)[:, 1][0])
+                if p_try < best_p - 1e-6:
+                    delta = abs(v - current)
+                    score = (best_p - p_try) / (delta + 1e-6)
+                    cand = (score, p_try, feat, v, current)
+                    if (best_candidate is None) or (cand[0] > best_candidate[0]):
+                        best_candidate = cand
+
+        if best_candidate is None:
+            break
+
+        _, p_new, feat, v_new, v_old = best_candidate
+        x.iloc[0, x.columns.get_loc(feat)] = v_new
+        changes[feat] = {"from": float(v_old), "to": float(v_new)}
+        best_p = p_new
+
+        if best_p < threshold:
+            return {
+                "status": "flipped",
+                "p_default_start": float(p0),
+                "p_default_end": float(best_p),
+                "changes": changes,
+                "counterfactual_row": x.to_dict(orient="records")[0],
+            }
+
+    return {
+        "status": "not_flipped",
+        "p_default_start": float(p0),
+        "p_default_end": float(best_p),
+        "changes": changes,
+        "counterfactual_row": x.to_dict(orient="records")[0],
+    }
+
+
+# ---------------------------
+# Reproducibility & artifact export
+# ---------------------------
+@dataclass
+class RunContext:
+    run_id: str
+    seed: int
+    created_utc: str
+    risk_tier: str
+    model_name: str
+    model_family: str
+    threshold: float
+
+
+def get_run_context(models: Dict[str, Any]) -> RunContext:
+    if "run_id" not in st.session_state:
+        st.session_state["run_id"] = _random_run_id("session05")
+    if "seed" not in st.session_state:
+        st.session_state["seed"] = DEFAULT_SEED
+    if "risk_tier" not in st.session_state:
+        st.session_state["risk_tier"] = "Tier 2 (Moderate)"
+    if "model_name" not in st.session_state:
+        st.session_state["model_name"] = list(models.keys())[0]
+    if "threshold" not in st.session_state:
+        st.session_state["threshold"] = 0.35
+
+    model_name = st.session_state["model_name"]
+    fam = model_family(models[model_name])
+
+    return RunContext(
+        run_id=st.session_state["run_id"],
+        seed=int(st.session_state["seed"]),
+        created_utc=st.session_state.get("created_utc", _utc_now_iso()),
+        risk_tier=st.session_state["risk_tier"],
+        model_name=model_name,
+        model_family=fam,
+        threshold=float(st.session_state["threshold"]),
+    )
+
+
+def compute_model_hash(model: Any) -> str:
+    import joblib
+    buf = io.BytesIO()
+    joblib.dump(model, buf)
+    return sha256_bytes(buf.getvalue())
+
+
+def export_bundle(
+    ctx: RunContext,
+    X: pd.DataFrame,
+    y: pd.Series,
+    model: Any,
+    global_obj: Optional[Dict[str, Any]],
+    local_obj: Optional[Dict[str, Any]],
+    counterfactual_obj: Optional[Dict[str, Any]],
+    notes_md: str,
+) -> Tuple[str, str]:
+    ensure_dir(REPORTS_ROOT)
+    out_dir = os.path.join(REPORTS_ROOT, ctx.run_id)
+    ensure_dir(out_dir)
+
+    dataset_hash = df_sha256(pd.concat([X, y], axis=1))
+    model_hash = compute_model_hash(model)
+
+    config_snapshot = {
+        "app_version": APP_VERSION,
+        "course": COURSE,
+        "session": SESSION,
+        "created_utc": ctx.created_utc,
+        "run_id": ctx.run_id,
+        "seed": ctx.seed,
+        "risk_tier": ctx.risk_tier,
+        "model_name": ctx.model_name,
+        "model_family": ctx.model_family,
+        "decision_threshold_default_risk": ctx.threshold,
+        "model_sha256": model_hash,
+        "dataset_sha256": dataset_hash,
+    }
+
+    paths = {}
+
+    def _write_json(name: str, obj: Dict[str, Any]) -> None:
+        p = os.path.join(out_dir, name)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, sort_keys=True)
+        paths[name] = p
+
+    def _write_text(name: str, s: str) -> None:
+        p = os.path.join(out_dir, name)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(s)
+        paths[name] = p
+
+    if global_obj is not None:
+        _write_json("global_explanation.json", global_obj)
+    if local_obj is not None:
+        _write_json("local_explanation.json", local_obj)
+    if counterfactual_obj is not None:
+        _write_json("counterfactual_example.json", counterfactual_obj)
+
+    _write_text("explanation_summary.md", notes_md)
+    _write_json("config_snapshot.json", config_snapshot)
+
+    evidence = {
+        "run_id": ctx.run_id,
+        "created_utc": ctx.created_utc,
+        "model_sha256": model_hash,
+        "dataset_sha256": dataset_hash,
+        "artifacts": {},
+        "hash_algorithm": "sha256",
+    }
+    for name, p in paths.items():
+        evidence["artifacts"][name] = {
+            "path": p.replace("\\", "/"),
+            "sha256": sha256_file(p),
+            "bytes": os.path.getsize(p),
+        }
+
+    _write_json("evidence_manifest.json", evidence)
+
+    zip_name = f"Session_05_{ctx.run_id}.zip"
+    zip_path = os.path.join(out_dir, zip_name)
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        for name, p in paths.items():
+            z.write(p, arcname=name)
+        z.write(os.path.join(out_dir, "evidence_manifest.json"),
+                arcname="evidence_manifest.json")
+
+    return out_dir, zip_path
+
+
+# ---------------------------
+# UI Components
+# ---------------------------
+def sidebar_controls(models: Dict[str, Any]):
+    # Sidebar (starter)
+    st.sidebar.image(
+        "https://www.quantuniversity.com/assets/img/logo5.jpg",
+        use_container_width=True
+    )
+    st.sidebar.divider()
+
+    # Page navigation
+    page = st.sidebar.selectbox(
+        "Navigation",
+        [
+            "0) Mission Brief",
+            "1) Persona Story",
+            "2) Data & Model (Backend Loaded)",
+            "3) Global Explanation (SHAP / Permutation)",
+            "4) Local Explanation (SHAP)",
+            "5) Local Explanation (LIME)",
+            "6) Counterfactual (Basic)",
+            "7) Reproducibility & Evidence",
+            "8) Export Bundle",
+        ],
+        key="page_select",
+    )
+
+    st.session_state["run_id"] = _random_run_id("session05")
+    st.session_state["created_utc"] = _utc_now_iso()
+
+    st.session_state.seed = 42
+
+    st.sidebar.selectbox(
+        "Risk tier",
+        ["Tier 1 (High)", "Tier 2 (Moderate)", "Tier 3 (Low)"],
+        key="risk_tier",
+    )
+    st.sidebar.selectbox("Baseline model", list(
+        models.keys()), key="model_name")
+    st.sidebar.slider(
+        "Decision threshold (default risk)",
+        min_value=0.05, max_value=0.80,
+        value=float(st.session_state.get("threshold", 0.35)),
+        step=0.01, key="threshold",
+        help="If predicted default risk ≥ threshold → DENY, else APPROVE.",
+    )
+
+    ctx = get_run_context(models)
+
+    return page, ctx
+
+
 st.title("QuLab: Lab 5: Interpretability & Explainability Control Workbench")
 st.divider()
 
-# Initialize session state variables with defaults
-if 'RANDOM_SEED' not in st.session_state:
-    st.session_state['RANDOM_SEED'] = RANDOM_SEED
-if 'TARGET_COLUMN' not in st.session_state:
-    st.session_state['TARGET_COLUMN'] = TARGET_COLUMN
 
-# Define default session state values
-default_states = {
-    'current_page': 'Home',
-    'model_loaded': False,
-    'data_loaded': False,
-    'model': None,
-    'data': pd.DataFrame(),
-    'X': pd.DataFrame(),
-    'y': pd.Series(dtype='float64'),
-    'model_hash': None,
-    'data_hash': None,
-    'feature_names': [],
-    'X_train_exp': pd.DataFrame(),
-    'global_importance_df': pd.DataFrame(),
-    'global_shap_values': None,
-    'instances_for_local_explanation': [],
-    'local_explanations_data': {},
-    'shap_explanations_list_for_plots': [],
-    'denied_instance_for_cf_idx': None,
-    'counterfactual_result': {},
-    'explanation_summary_md': '',
-    'run_id': None,
-    'explanation_dir': None,
-    'output_files_to_bundle': [],
-    'zip_archive_path': None,
-    'loaded_model_filename': None,
-    'loaded_data_filename': None,
-    'temp_model_path': None,
-    'temp_data_path': None,
-    'shap_explainer_for_local': None
-}
+def mission_brief_page():
+    st.markdown(
+        """
+This Streamlit application operationalizes **model interpretability as an enterprise control artifact**.
 
-for key, default_value in default_states.items():
-    if key not in st.session_state:
-        st.session_state[key] = default_value
+You will walk through an *audit-style* workflow: choose a baseline model, generate global and local explanations,
+run a basic counterfactual, and export an evidence bundle that is:
+- tied to a specific **model version**,
+- reproducible with a fixed **seed**,
+- backed by a **SHA-256 evidence manifest**.
 
-# Generate a unique run_id and explanation_dir if not yet set for the session
-if st.session_state.run_id is None:
-    st.session_state.run_id = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    st.session_state.explanation_dir = os.path.join(
-        'reports', f'session_05_validation_run_{st.session_state.run_id}')
-    os.makedirs(st.session_state.explanation_dir, exist_ok=True)
-
-# Sidebar Navigation
-with st.sidebar:
-    st.title("PrimeCredit Bank 🏦")
-    st.markdown(f"### Model Validation Workbench")
-
-    page_options = ["Home", "1. Upload & Configure", "2. Global Explanations", "3. Local Explanations",
-                    "4. Counterfactuals", "5. Validation Summary", "6. Export Artifacts"]
-
-    # Use index to set default selection based on current_page
-    try:
-        current_index = page_options.index(st.session_state.current_page)
-    except ValueError:
-        current_index = 0
-
-    st.session_state.current_page = st.selectbox(
-        "Navigate",
-        page_options,
-        index=current_index
+> **Enterprise question:** *Can this model’s decisions be explained to auditors, regulators, and internal stakeholders in a reproducible and defensible way?*
+"""
     )
-    st.markdown(f"---")
+    st.info(
+        "Use the sidebar navigation to follow the persona-driven story arc end-to-end.")
 
-    st.info(f"Model Loaded: {'✅' if st.session_state.model_loaded else '❌'}")
-    st.info(f"Data Loaded: {'✅' if st.session_state.data_loaded else '❌'}")
+    st.markdown("### What you’ll produce in the export bundle")
+    st.markdown(
+        """
+- `global_explanation.json`
+- `local_explanation.json`
+- `counterfactual_example.json` (if generated)
+- `explanation_summary.md`
+- `config_snapshot.json`
+- `evidence_manifest.json`
+- `Session_05_<run_id>.zip`
+"""
+    )
 
-    if st.session_state.model_loaded:
-        st.caption(
-            f"Model: {st.session_state.loaded_model_filename} ({st.session_state.model_hash[:8]}...)")
-    if st.session_state.data_loaded:
-        st.caption(
-            f"Data: {st.session_state.loaded_data_filename} ({st.session_state.data_hash[:8]}...)")
+    st.markdown("### Quick start checklist")
+    st.markdown(
+        """
+1. Use the **sidebar** to pick a baseline model and decision threshold.  
+2. Review **Global Explanation** for drivers and stability.  
+3. Review **Local Explanation** for a single case (SHAP + LIME).  
+4. Generate a **Counterfactual** (basic) and record constraints.  
+5. Export the **evidence bundle**.
+"""
+    )
 
-# Page 1: Home
-if st.session_state.current_page == "Home":
-    st.markdown(f"## Validating PrimeCredit Bank's Loan Approval Model")
-    st.markdown(f"")
-    st.markdown(f"As **Anya Sharma**, a dedicated Model Validator at PrimeCredit Bank, my primary responsibility is to ensure that all machine learning models used in critical business processes are transparent, fair, and compliant with internal governance and external regulatory standards.")
-    st.markdown(f"Today, my focus is on a newly developed **Credit Approval Model (CAM v1.2)**, which will determine loan eligibility for our customers. Before this model can be deployed, I must rigorously assess its interpretability and explainability.")
-    st.markdown(f"My goal is to thoroughly vet this model, identifying any interpretability gaps that could lead to biased decisions, regulatory scrutiny, or a lack of trust from stakeholders. I need to demonstrate that the model's decisions are defensible and understandable, not just to me, but also to internal auditors and future regulators. This application serves as my workbench to generate, analyze, and document the required explanations as audit-ready artifacts.")
-    st.markdown(f"")
-    st.info("Navigate to '1. Upload & Configure' to start your validation process.")
 
-# Page 2: 1. Upload & Configure
-elif st.session_state.current_page == "1. Upload & Configure":
-    st.title("2. Setting the Stage: Environment Setup and Data Ingestion")
-    st.markdown(f"My first step is to prepare my environment and load the necessary model and data for validation. Reproducibility is paramount in model validation; therefore, I will fix a random seed and compute SHA-256 hashes for both the model and dataset to ensure traceability and detect any unauthorized changes.")
-    st.markdown(f"")
+def persona_story_page():
+    st.header("1) Persona Story — From Analysis to Audit Evidence")
+    st.markdown(
+        f"""
+### You are **{PERSONA_NAME}**, {PERSONA_ROLE} at **{ORG_NAME}**
 
-    st.subheader("Load Model and Data")
-    uploaded_model_file = st.file_uploader(
-        "Upload Trained ML Model (.pkl or .joblib)", type=["pkl", "joblib"])
-    uploaded_data_file = st.file_uploader(
-        "Upload Feature Dataset (.csv)", type=["csv"])
+A new credit decisioning model is scheduled for deployment. Before it can go live, you must deliver a *validation-ready* explanation package.
 
-    col1, col2 = st.columns(2)
+Your stakeholders:
+- **Internal Auditor**: wants traceability and reproducibility.
+- **ML Engineer**: wants actionable feedback if explanations reveal issues.
+- **Business Owner**: wants clarity on top drivers of approvals/denials.
+
+---
+
+### Your mission (what “good” looks like)
+
+You will produce explanation artifacts that are:
+1. **Reproducible** — repeated runs with the same configuration produce consistent rankings.
+2. **Traceable** — artifacts are tied to a specific model version hash and dataset hash.
+3. **Decision-relevant** — local explanations clearly connect to approve/deny outcomes.
+4. **Exportable** — packaged into a single evidence bundle for review.
+
+---
+
+### The story arc
+
+**Scene A — Triage:**  
+Pick the baseline model (interpretable vs black-box) and set the decision threshold.
+
+**Scene B — Global understanding:**  
+Identify which features most influence default risk *overall*.
+
+**Scene C — Case file deep-dive:**  
+Explain *one* decision with local explanations (SHAP + LIME), using consistent language.
+
+**Scene D — Remediation signal:**  
+Generate a basic counterfactual: “what minimal change flips the decision?”
+
+**Scene E — Audit bundle:**  
+Export all artifacts, with SHA-256 hashes, into `reports/session05/<run_id>/`.
+
+> This transforms interpretability from “pretty charts” into **enterprise control evidence**.
+"""
+    )
+
+
+def data_model_page(X: pd.DataFrame, y: pd.Series, models: Dict[str, Any], ctx: RunContext):
+    st.header("2) Data & Model (Backend Loaded)")
+    st.markdown(
+        """
+This lab uses **backend-loaded sample data and baseline models**. No uploads are required.
+
+- The dataset is deterministically generated from a fixed seed.
+- Two baseline models are trained on the backend:
+  - **Interpretable**: Logistic Regression
+  - **Black-box**: Random Forest
+
+Target definition:
+- `default_risk = 1` → higher risk (bad)
+- `default_risk = 0` → lower risk (good)
+
+Decision rule used throughout the app:
+- If predicted default risk **≥ threshold** → **DENY**
+- Else → **APPROVE**
+"""
+    )
+
+    col1, col2 = st.columns([1, 1])
     with col1:
-        if st.button("Load Uploaded Files", type="primary", width='stretch', disabled=(uploaded_model_file is None or uploaded_data_file is None)):
-            st.session_state.temp_model_path = "uploaded_model.pkl"
-            st.session_state.temp_data_path = "uploaded_data.csv"
-            with open(st.session_state.temp_model_path, "wb") as f:
-                f.write(uploaded_model_file.getbuffer())
-            with open(st.session_state.temp_data_path, "wb") as f:
-                f.write(uploaded_data_file.getbuffer())
+        st.subheader("Dataset preview")
+        st.dataframe(pd.concat([X.head(20), y.head(20)],
+                     axis=1), use_container_width=True)
+        st.caption(
+            f"Rows: {len(X):,} • Features: {X.shape[1]} • Dataset SHA-256 is computed at export time.")
+    with col2:
+        st.subheader("Model snapshot")
+        m = models[ctx.model_name]
+        st.code(repr(m), language="text")
+        st.write(f"Detected model family: **{ctx.model_family}**")
+        st.caption(
+            "Model SHA-256 is computed at export time (by serializing the model).")
 
-            st.session_state.loaded_model_filename = uploaded_model_file.name
-            st.session_state.loaded_data_filename = uploaded_data_file.name
+    st.subheader("Performance sanity check (not a full validation)")
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=ctx.seed, stratify=y)
+    m = models[ctx.model_name]
+    metrics = evaluate_model(m, X_test, y_test)
+    st.metric("ROC-AUC (test)", f"{metrics['roc_auc']:.3f}")
+    st.markdown("**Confusion matrix (threshold=0.5)**")
+    st.write(metrics["confusion_matrix"])
+    with st.expander("Classification report"):
+        st.json(metrics["classification_report"])
 
+
+def global_explanation_page(X: pd.DataFrame, y: pd.Series, models: Dict[str, Any], ctx: RunContext):
+    st.header("3) Global Explanation (SHAP / Permutation)")
+    st.markdown(
+        """
+Global explanations answer: **“What drives the model overall?”**
+
+In this lab:
+- For **tree** and **linear** baselines, we prefer **SHAP**.
+- For **black-box** models (or if SHAP is unavailable), we use **Permutation Importance** (ROC-AUC).
+"""
+    )
+
+    m = models[ctx.model_name]
+    fam = ctx.model_family
+
+    X_bg = X.sample(n=min(400, len(X)), random_state=ctx.seed)
+    X_sample = X.sample(n=min(800, len(X)), random_state=ctx.seed + 1)
+
+    if fam in ("tree", "linear") and _HAS_SHAP:
+        imp_df, meta = compute_shap_global(
+            m, X_bg=X_bg, X_sample=X_sample, family=fam)
+        st.success(f"Method used: **SHAP ({meta['explainer']})**")
+        st.caption(f"Sample size: {len(X_sample)}")
+        fig = shap_summary_plot(imp_df.head(
+            15), title="Mean |SHAP| feature importance (top 15)")
+        st.pyplot(fig, clear_figure=True)
+    else:
+        imp_df = compute_permutation_importance(
+            m, X_sample, y.loc[X_sample.index], seed=ctx.seed, n_repeats=7)
+        st.warning(
+            "Using fallback: **Permutation importance** (expected for black-box models or when SHAP is missing).")
+        st.dataframe(imp_df.head(15), use_container_width=True)
+
+    st.subheader("Stability check (repeatability)")
+    st.markdown(
+        """
+An enterprise control must be **reproducible**.  
+Here we re-run the global importance computation several times and measure rank stability.
+
+- SHAP should be stable with fixed seeds and deterministic models.
+- Permutation importance can vary, so we report rank variation.
+"""
+    )
+
+    repeats = st.slider("Number of repeats", 2, 8, 3,
+                        help="More repeats → more confidence, slower runtime.")
+    if st.button("Run stability check"):
+        ranks = []
+        for i in range(repeats):
+            seed_i = ctx.seed + i * 7
+            X_s = X.sample(n=min(700, len(X)), random_state=seed_i)
+            if fam in ("tree", "linear") and _HAS_SHAP:
+                imp_i, _ = compute_shap_global(
+                    m, X_bg=X_bg, X_sample=X_s, family=fam)
+                score_series = imp_i.set_index("feature")["mean_abs_shap"]
+            else:
+                imp_i = compute_permutation_importance(
+                    m, X_s, y.loc[X_s.index], seed=seed_i, n_repeats=5)
+                score_series = imp_i.set_index("feature")["importance_mean"]
+            ranks.append(score_series.rank(ascending=False))
+
+        rank_df = pd.concat(ranks, axis=1)
+        rank_df.columns = [f"run_{i+1}" for i in range(repeats)]
+        rank_df["rank_std"] = rank_df.std(axis=1)
+        rank_df = rank_df.sort_values("rank_std").reset_index().rename(
+            columns={"index": "feature"})
+        st.dataframe(rank_df.head(20), use_container_width=True)
+        st.caption("Lower rank_std indicates higher stability.")
+
+
+def local_explanation_shap_page(X: pd.DataFrame, y: pd.Series, models: Dict[str, Any], ctx: RunContext):
+    st.header("4) Local Explanation (SHAP)")
+    st.markdown(
+        """
+Local explanations answer: **“Why this decision for this applicant?”**
+
+Note: In this app, SHAP local explanations are enabled for the **tree** and **linear** baseline models.
+"""
+    )
+
+    if not _HAS_SHAP:
+        st.error(
+            "SHAP is not installed. Install with: `pip install shap` and restart.")
+        st.stop()
+
+    m = models[ctx.model_name]
+    fam = ctx.model_family
+    if fam not in ("tree", "linear"):
+        st.warning(
+            "Selected model is black-box. Use the LIME page for local explanations, or switch to a tree/linear baseline.")
+        st.stop()
+
+    idx = st.number_input("Applicant row index", min_value=0,
+                          max_value=len(X)-1, value=0, step=1)
+    x_row = X.iloc[[int(idx)]]
+    p_default = float(m.predict_proba(x_row)[:, 1][0])
+    decision = decision_label(p_default, ctx.threshold)
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+    col1.metric("Predicted default risk", f"{p_default:.3f}")
+    col2.metric("Threshold", f"{ctx.threshold:.2f}")
+    col3.metric("Decision", decision)
+
+    st.markdown("#### Applicant features")
+    st.dataframe(x_row.T.rename(
+        columns={x_row.index[0]: "value"}), use_container_width=True)
+
+    X_bg = X.sample(n=min(500, len(X)), random_state=ctx.seed)
+    local_df, meta = compute_shap_local(m, X_bg=X_bg, x_row=x_row, family=fam)
+
+    st.markdown("#### Top contributors (SHAP)")
+    st.dataframe(local_df.head(12), use_container_width=True)
+
+    fig = shap_local_waterfall_plot(
+        local_df=local_df.head(12),
+        base_value=float(meta["base_value"]),
+        title="Local SHAP waterfall (top 12 contributions)",
+    )
+    st.pyplot(fig, clear_figure=True)
+
+    st.markdown(
+        """
+#### How to read this (auditor-friendly)
+
+- **Positive contribution** → increases predicted default risk (pushes toward DENY)  
+- **Negative contribution** → decreases predicted default risk (pushes toward APPROVE)  
+- The **base value** is the model’s expected output; contributions explain deviation for this case.
+"""
+    )
+
+
+def local_explanation_lime_page(X: pd.DataFrame, y: pd.Series, models: Dict[str, Any], ctx: RunContext):
+    st.header("5) Local Explanation (LIME)")
+    st.markdown(
+        """
+LIME provides a **local surrogate model** around one instance.
+
+Why it matters in an enterprise workbench:
+- Works for **any** classifier with `predict_proba`.
+- Provides a cross-check for SHAP or a route for black-box explainability.
+"""
+    )
+
+    if not _HAS_LIME:
+        st.error(
+            "LIME is not installed. Install with: `pip install lime` and restart.")
+        st.stop()
+
+    m = models[ctx.model_name]
+    idx = st.number_input("Applicant row index", min_value=0, max_value=len(
+        X)-1, value=0, step=1, key="lime_idx")
+    x_row = X.iloc[[int(idx)]]
+    p_default = float(m.predict_proba(x_row)[:, 1][0])
+    decision = decision_label(p_default, ctx.threshold)
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+    col1.metric("Predicted default risk", f"{p_default:.3f}")
+    col2.metric("Threshold", f"{ctx.threshold:.2f}")
+    col3.metric("Decision", decision)
+
+    X_train, _, _, _ = train_test_split(
+        X, y, test_size=0.25, random_state=ctx.seed, stratify=y)
+
+    if st.button("Run LIME explanation"):
+        with st.spinner("Computing LIME explanation..."):
+            lime_obj = lime_local_explanation(
+                model=m,
+                X_train=X_train,
+                x_row=x_row,
+                class_names=["no_default", "default"],
+                seed=ctx.seed,
+                num_features=10,
+            )
+        st.success("LIME explanation generated.")
+
+        st.markdown("#### Explanation (list form)")
+        st.write(pd.DataFrame(lime_obj["as_list"], columns=[
+                 "condition", "weight"]).sort_values("weight", ascending=False))
+
+        st.markdown("#### Explanation (HTML)")
+        st.components.v1.html(lime_obj["as_html"], height=500, scrolling=True)
+
+        st.caption(
+            "Positive weights push toward 'default'; negative weights push away (local approximation).")
+
+
+def counterfactual_page(X: pd.DataFrame, y: pd.Series, models: Dict[str, Any], ctx: RunContext):
+    st.header("6) Counterfactual (Basic)")
+    st.markdown(
+        """
+Counterfactuals answer: **“What is the smallest change that flips the decision?”**
+
+This is a **basic, constraint-aware greedy** search (control demonstration).  
+It prefers “risk-reducing” directions (e.g., increase credit score, decrease DTI).
+"""
+    )
+
+    m = models[ctx.model_name]
+    idx = st.number_input("Applicant row index", min_value=0,
+                          max_value=len(X)-1, value=0, step=1, key="cf_idx")
+    x_row = X.iloc[[int(idx)]]
+    p_default = float(m.predict_proba(x_row)[:, 1][0])
+    decision = decision_label(p_default, ctx.threshold)
+    st.write(
+        f"Current predicted default risk: **{p_default:.3f}** → **{decision}**")
+
+    strategy = st.radio(
+        "Ranking strategy",
+        ["Use SHAP (if available + supported model)",
+         "Use global importance (fallback)"],
+        index=0,
+    )
+
+    ranked_features: List[str] = list(X.columns)
+
+    if strategy.startswith("Use SHAP") and _HAS_SHAP and ctx.model_family in ("tree", "linear"):
+        X_bg = X.sample(n=min(500, len(X)), random_state=ctx.seed)
+        local_df, _ = compute_shap_local(
+            m, X_bg=X_bg, x_row=x_row, family=ctx.model_family)
+        ranked_features = local_df["feature"].tolist()
+        st.caption("Ranking features by |local SHAP|.")
+    else:
+        imp = compute_permutation_importance(
+            m,
+            X.sample(n=min(900, len(X)), random_state=ctx.seed + 99),
+            y.sample(n=min(900, len(y)), random_state=ctx.seed + 99),
+            seed=ctx.seed,
+            n_repeats=5,
+        )
+        ranked_features = imp["feature"].tolist()
+        st.caption("Ranking features by permutation importance.")
+
+    if st.button("Generate counterfactual"):
+        with st.spinner("Searching for a counterfactual..."):
+            cf = generate_counterfactual_greedy(
+                model=m,
+                X_ref=X,
+                x0=x_row,
+                threshold=ctx.threshold,
+                local_ranked_features=ranked_features,
+            )
+
+        st.subheader("Counterfactual result")
+        st.json(cf)
+
+        st.markdown("**Changes applied**")
+        if cf["changes"]:
+            st.write(pd.DataFrame(
+                [{"feature": k, "from": v["from"], "to": v["to"]}
+                    for k, v in cf["changes"].items()]
+            ))
+        else:
+            st.write("No feature changes found.")
+
+
+def reproducibility_page(X: pd.DataFrame, y: pd.Series, models: Dict[str, Any], ctx: RunContext):
+    st.header("7) Reproducibility & Evidence")
+    st.markdown(
+        """
+Enterprise interpretability requires **reproducibility controls**.
+
+This page previews:
+- Fixed seed usage
+- Model SHA-256 (serialized model hash)
+- Dataset SHA-256 (data + labels hash)
+- What will be captured in `config_snapshot.json`
+"""
+    )
+
+    m = models[ctx.model_name]
+    model_hash = compute_model_hash(m)
+    dataset_hash = df_sha256(pd.concat([X, y], axis=1))
+
+    col1, col2 = st.columns([1, 1])
+    col1.metric("Model SHA-256 (version hash)", model_hash[:16] + "…")
+    col2.metric("Dataset SHA-256", dataset_hash[:16] + "…")
+
+    st.markdown("#### Config snapshot preview")
+    config_preview = {
+        "app_version": APP_VERSION,
+        "created_utc": ctx.created_utc,
+        "run_id": ctx.run_id,
+        "seed": ctx.seed,
+        "risk_tier": ctx.risk_tier,
+        "model_name": ctx.model_name,
+        "model_family": ctx.model_family,
+        "decision_threshold_default_risk": ctx.threshold,
+        "model_sha256": model_hash,
+        "dataset_sha256": dataset_hash,
+    }
+    st.code(pretty_json(config_preview), language="json")
+
+
+def export_page(X: pd.DataFrame, y: pd.Series, models: Dict[str, Any], ctx: RunContext):
+    st.header("8) Export Bundle")
+    st.markdown(
+        """
+Tip: Use the helper buttons below to populate artifacts into the session for export.
+"""
+    )
+
+    if "global_obj" not in st.session_state:
+        st.session_state["global_obj"] = None
+    if "local_obj" not in st.session_state:
+        st.session_state["local_obj"] = None
+    if "counterfactual_obj" not in st.session_state:
+        st.session_state["counterfactual_obj"] = None
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+    m = models[ctx.model_name]
+
+    with col1:
+        if st.button("Generate GLOBAL artifact", width='stretch'):
             try:
-                model, full_data, X, y, model_hash_val_local, data_hash_val_local = load_and_hash_artifacts(
-                    st.session_state.temp_model_path, st.session_state.temp_data_path, st.session_state.TARGET_COLUMN, st.session_state.RANDOM_SEED
-                )
+                X_bg = X.sample(n=min(400, len(X)), random_state=ctx.seed)
+                X_sample = X.sample(n=min(800, len(X)),
+                                    random_state=ctx.seed + 1)
+                fam = ctx.model_family
+                if fam in ("tree", "linear") and _HAS_SHAP:
+                    imp_df, meta = compute_shap_global(
+                        m, X_bg=X_bg, X_sample=X_sample, family=fam)
+                    method = f"SHAP/{meta['explainer']}"
+                else:
+                    imp_df = compute_permutation_importance(
+                        m, X_sample, y.loc[X_sample.index], seed=ctx.seed, n_repeats=7)
+                    method = "PermutationImportance"
 
-                st.session_state.model = model
-                st.session_state.data = full_data
-                st.session_state.X = X
-                st.session_state.y = y
-                st.session_state.model_hash = model_hash_val_local
-                st.session_state.data_hash = data_hash_val_local
-                st.session_state.feature_names = X.columns.tolist()
-                st.session_state.model_loaded = True
-                st.session_state.data_loaded = True
-
-                X_train_exp, _, _, _ = train_test_split(
-                    X, y, test_size=0.2, random_state=st.session_state.RANDOM_SEED)
-                st.session_state.X_train_exp = X_train_exp
-
-                st.session_state.shap_explainer_for_local = shap.TreeExplainer(
-                    model)
-
-                st.success(
-                    "Model and data loaded successfully from uploaded files!")
+                st.session_state["global_obj"] = {
+                    "run_id": ctx.run_id,
+                    "created_utc": ctx.created_utc,
+                    "model_name": ctx.model_name,
+                    "model_family": ctx.model_family,
+                    "method": method,
+                    "top_features": imp_df.head(25).to_dict(orient="records"),
+                }
+                st.success("Global artifact stored.")
             except Exception as e:
-                st.error(f"Error loading uploaded files: {e}")
-                st.session_state.model_loaded = False
-                st.session_state.data_loaded = False
-            finally:
-                if os.path.exists(st.session_state.temp_model_path):
-                    os.remove(st.session_state.temp_model_path)
-                if os.path.exists(st.session_state.temp_data_path):
-                    os.remove(st.session_state.temp_data_path)
+                st.error(f"Global artifact failed: {e}")
 
     with col2:
-        if st.button("Load Sample Data", width='stretch', disabled=(st.session_state.model_loaded and st.session_state.data_loaded)):
-            generate_sample_data_and_model('sample_credit_model.pkl', 'sample_credit_data.csv',
-                                           st.session_state.TARGET_COLUMN, st.session_state.RANDOM_SEED)
-
-            st.session_state.temp_model_path = 'sample_credit_model.pkl'
-            st.session_state.temp_data_path = 'sample_credit_data.csv'
-            st.session_state.loaded_model_filename = 'sample_credit_model.pkl'
-            st.session_state.loaded_data_filename = 'sample_credit_data.csv'
-
+        if st.button("Generate LOCAL artifact ", width='stretch'):
             try:
-                model, full_data, X, y, model_hash_val_local, data_hash_val_local = load_and_hash_artifacts(
-                    st.session_state.temp_model_path, st.session_state.temp_data_path, st.session_state.TARGET_COLUMN, st.session_state.RANDOM_SEED
-                )
-                st.session_state.model = model
-                st.session_state.data = full_data
-                st.session_state.X = X
-                st.session_state.y = y
-                st.session_state.model_hash = model_hash_val_local
-                st.session_state.data_hash = data_hash_val_local
-                st.session_state.feature_names = X.columns.tolist()
-                st.session_state.model_loaded = True
-                st.session_state.data_loaded = True
+                idx = 0
+                x_row = X.iloc[[idx]]
+                p_default = float(m.predict_proba(x_row)[:, 1][0])
+                decision = decision_label(p_default, ctx.threshold)
 
-                X_train_exp, _, _, _ = train_test_split(
-                    X, y, test_size=0.2, random_state=st.session_state.RANDOM_SEED)
-                st.session_state.X_train_exp = X_train_exp
+                local = None
+                if ctx.model_family in ("tree", "linear") and _HAS_SHAP:
+                    X_bg = X.sample(n=min(500, len(X)), random_state=ctx.seed)
+                    local_df, meta = compute_shap_local(
+                        m, X_bg=X_bg, x_row=x_row, family=ctx.model_family)
+                    local = {
+                        "type": "SHAP",
+                        "explainer": meta["explainer"],
+                        "base_value": meta["base_value"],
+                        "contributions": local_df.head(25).to_dict(orient="records"),
+                    }
+                elif _HAS_LIME:
+                    X_train, _, _, _ = train_test_split(
+                        X, y, test_size=0.25, random_state=ctx.seed, stratify=y)
+                    lime_obj = lime_local_explanation(
+                        model=m,
+                        X_train=X_train,
+                        x_row=x_row,
+                        class_names=["no_default", "default"],
+                        seed=ctx.seed,
+                        num_features=10,
+                    )
+                    local = {
+                        "type": "LIME",
+                        "explanation_list": lime_obj["as_list"],
+                    }
+                else:
+                    raise RuntimeError(
+                        "Neither SHAP (supported model) nor LIME is available for local artifact.")
 
-                st.session_state.shap_explainer_for_local = shap.TreeExplainer(
-                    model)
-
-                st.success("Sample model and data loaded successfully!")
+                st.session_state["local_obj"] = {
+                    "run_id": ctx.run_id,
+                    "created_utc": ctx.created_utc,
+                    "row_index": idx,
+                    "predicted_default_risk": p_default,
+                    "threshold": ctx.threshold,
+                    "decision": decision,
+                    "local_explanation": local,
+                }
+                st.success("Local artifact stored.")
             except Exception as e:
-                st.error(f"Error loading sample files: {e}")
-                st.session_state.model_loaded = False
-                st.session_state.data_loaded = False
+                st.error(f"Local artifact failed: {e}")
 
-    if st.session_state.model_loaded and st.session_state.data_loaded:
-        st.subheader("Loaded Artifact Details:")
-        st.markdown(
-            f"- **Model File:** `{st.session_state.loaded_model_filename}`")
-        st.markdown(
-            f"- **Model Hash (SHA-256):** `{st.session_state.model_hash}`")
-        st.markdown(
-            f"- **Data File:** `{st.session_state.loaded_data_filename}`")
-        st.markdown(
-            f"- **Data Hash (SHA-256):** `{st.session_state.data_hash}`")
-        st.markdown(
-            f"- **Random Seed Used:** `{st.session_state.RANDOM_SEED}`")
-        st.markdown(
-            f"- **Model type identified:** `{type(st.session_state.model)}`")
-        st.markdown(
-            f"- **Data features:** `{', '.join(st.session_state.feature_names)}`")
-
-        st.markdown(f"First 5 rows of feature data:")
-        st.dataframe(st.session_state.X.head())
-
-        st.markdown(f"")
-        st.markdown(
-            f"The initial setup is complete. I've successfully loaded the Credit Approval Model and the associated feature dataset. Crucially, I've generated cryptographic hashes for both artifacts: `{st.session_state.model_hash}` for `{st.session_state.loaded_model_filename}` and `{st.session_state.data_hash}` for `{st.session_state.loaded_data_filename}`. These hashes are vital for maintaining an immutable audit trail; any future change to either the model or the dataset would result in a different hash, immediately signaling a potential issue to an auditor. This step aligns with PrimeCredit Bank's stringent requirements for data and model integrity. The data has also been pre-processed, separating features from the target variable, making it ready for explanation generation.")
-
-# Page 3: 2. Global Explanations
-elif st.session_state.current_page == "2. Global Explanations":
-    st.title("3. Unveiling Overall Behavior: Global Model Explanations")
-    st.markdown(f"As a Model Validator, I first need to grasp the overall behavior of the CAM v1.2. Which factors generally drive its decisions for approving or denying loans? Global explanations provide an aggregate view of feature importance, revealing which features have the most impact across all predictions. This helps me verify if the model's general logic aligns with PrimeCredit's lending policies and expert domain knowledge. For tree-based models like our `RandomForestClassifier`, SHAP (SHapley Additive exPlanations) values are an excellent choice for this. The SHAP value $\phi_i$ for a feature $i$ represents the average marginal contribution of that feature value to the prediction across all possible coalitions of features.")
-    st.markdown(r"The fundamental idea behind SHAP values is to attribute the prediction of an instance $x$ to its features by considering the contribution of each feature to moving the prediction from the base value (average prediction) to the current prediction. The sum of the SHAP values for all features and the base value equals the model's output for that instance:")
-    st.markdown(r"$$ \phi_0 + \sum_{{i=1}}^{{M}} \phi_i(f, x) = f(x) $$")
-    st.markdown(r"where $\phi_0$ is the expected model output (the base value), $M$ is the number of features, $\phi_i(f, x)$ is the SHAP value for feature $i$ for instance $x$, and $f(x)$ is the model's prediction for instance $x$.")
-    st.markdown(f"")
-
-    if st.button("Generate Global Explanations", disabled=not st.session_state.model_loaded):
-        with st.spinner("Generating global SHAP explanations... This may take a moment."):
+    with col3:
+        if st.button("Generate COUNTERFACTUAL artifact ", width='stretch'):
             try:
-                global_importance_df, global_shap_values_raw = generate_global_shap_explanation(
-                    st.session_state.model,
-                    st.session_state.X_train_exp,
-                    st.session_state.feature_names,
-                    st.session_state.explanation_dir
+                idx = 0
+                x_row = X.iloc[[idx]]
+                ranked = list(X.columns)
+                if _HAS_SHAP and ctx.model_family in ("tree", "linear"):
+                    X_bg = X.sample(n=min(500, len(X)), random_state=ctx.seed)
+                    local_df, _ = compute_shap_local(
+                        m, X_bg=X_bg, x_row=x_row, family=ctx.model_family)
+                    ranked = local_df["feature"].tolist()
+
+                cf = generate_counterfactual_greedy(
+                    model=m,
+                    X_ref=X,
+                    x0=x_row,
+                    threshold=ctx.threshold,
+                    local_ranked_features=ranked,
                 )
-                st.session_state.global_importance_df = global_importance_df
-                st.session_state.global_shap_values = global_shap_values_raw
-
-                st.success("Global explanations generated!")
+                st.session_state["counterfactual_obj"] = cf
+                st.success("Counterfactual artifact stored.")
             except Exception as e:
-                st.error(f"Error generating global explanations: {e}")
+                st.error(f"Counterfactual artifact failed: {e}")
 
-    if not st.session_state.global_importance_df.empty:
-        st.subheader("Global Feature Importance Ranking")
-        st.dataframe(st.session_state.global_importance_df)
+    st.divider()
+    notes_md = st.text_area(
+        "Explanation summary (saved as explanation_summary.md)",
+        value=f"""# Lab 5 — Explanation Summary
 
-        try:
-            preds = st.session_state.model.predict(
-                st.session_state.X_train_exp)
-            # Print y_train_exp distribution
-            if 'y_train_exp' in st.session_state:
-                y_train_exp = st.session_state.y_train_exp
-            else:
-                # Try to reconstruct y_train_exp from X_train_exp's index
-                y_train_exp = st.session_state.y.loc[st.session_state.X_train_exp.index]
-                st.session_state['y_train_exp'] = y_train_exp
+**Persona:** {PERSONA_NAME} ({PERSONA_ROLE})
+**Organization:** {ORG_NAME}
+**Run:** {ctx.run_id}
+**Created (UTC):** {ctx.created_utc}
+**Model:** {ctx.model_name} ({ctx.model_family})
+**Decision threshold:** default risk ≥ {ctx.threshold:.2f} ⇒ DENY
 
-            # Debug: Print y (full label) distribution
-        except Exception as e:
-            st.error(f"Error predicting on X_train_exp: {e}")
+## Findings
+- *(Write your validation notes here.)*
 
-        st.subheader("SHAP Global Summary Plot")
+## Validator notes
+- Plausibility of top drivers:
+- Any surprising drivers:
+- Stability concerns:
+- Recommended follow-ups:
+""",
+        height=260,
+    )
 
-        if isinstance(st.session_state.global_shap_values, list):
-            shap_values_for_plot = st.session_state.global_shap_values[1]
-        else:
-            shap_values_for_plot = st.session_state.global_shap_values
-
-        if shap_values_for_plot is not None and not st.session_state.X_train_exp.empty:
-            # For plot_type='bar', only pass SHAP values (not sample data) to avoid row mismatch error
-            shap.summary_plot(
-                shap_values_for_plot,
-                plot_type="bar",
-                show=False
-            )
-            fig = plt.gcf()
-            st.pyplot(fig)
-            plt.close(fig)
-        else:
-            st.warning("Global SHAP values or data for plotting not available.")
-
-        st.markdown(f"")
-        st.markdown(f"The global SHAP explanation reveals the overall drivers of the Credit Approval Model. From the summary plot and the `global_importance_df`, I can clearly see which features, such as `credit_score` and `income`, are most influential in the model's decisions regarding loan approval. This high-level overview confirms that the model is largely relying on expected financial health indicators, which aligns with PrimeCredit Bank's lending criteria. This gives me initial confidence that the model's general behavior is sensible and explainable to senior stakeholders. However, global explanations only tell part of the story; I need to investigate specific individual decisions to ensure consistency and fairness.")
-
-# Page 4: 3. Local Explanations
-elif st.session_state.current_page == "3. Local Explanations":
-    st.title(
-        "4. Deep Dive into Individual Decisions: Local Explanations for Specific Loan Applications")
-    st.markdown(f"While global explanations are useful, they don't explain why a *specific* loan applicant was approved or denied. As a Model Validator, I frequently encounter requests to understand individual decisions, especially for denied applications or those with unusual profiles. For PrimeCredit Bank, it's crucial to provide clear, defensible reasons to customers for loan denials or approvals. I will select a few representative cases from our `sample_credit_data` to generate local explanations using SHAP. This allows me to examine the contribution of each feature to that particular prediction.")
-    st.markdown(r"For a specific instance $x$, the SHAP values $\phi_i(f, x)$ quantify how much each feature $i$ contributes to the prediction $f(x)$ compared to the average prediction $\phi_0$. A positive SHAP value for a feature means it pushed the prediction higher (towards approval), while a negative value pushed it lower (towards denial).")
-    st.markdown(f"")
-
-    if st.session_state.data_loaded:
-        st.subheader("Select Instances for Local Explanation")
-        st.dataframe(st.session_state.X.head())
-
-        selected_indices_for_local_default = []
-        if not st.session_state.X.empty and not st.session_state.y.empty:
-            denied_indices = st.session_state.y[st.session_state.y == 0].index
-            approved_indices = st.session_state.y[st.session_state.y == 1].index
-
-            suggested_unique_indices = set()
-
-            if not denied_indices.empty:
-                suggested_unique_indices.add(denied_indices[0])
-            elif not st.session_state.X.empty:
-                suggested_unique_indices.add(st.session_state.X.index[0])
-
-            if not approved_indices.empty:
-                for idx in approved_indices:
-                    if idx not in suggested_unique_indices:
-                        suggested_unique_indices.add(idx)
-                        break
-            if len(suggested_unique_indices) < 2 and not st.session_state.X.empty:
-                for idx in st.session_state.X.index:
-                    if idx not in suggested_unique_indices:
-                        suggested_unique_indices.add(idx)
-                        break
-
-            probabilities_for_borderline = np.zeros(len(st.session_state.X))
-            if len(st.session_state.X) > 0 and hasattr(st.session_state.model, 'classes_') and st.session_state.TARGET_COLUMN in st.session_state.model.classes_:
-                positive_class_idx_for_proba_main_block = np.where(
-                    st.session_state.model.classes_ == 1)[0][0]
-                model_predict_proba_output = st.session_state.model.predict_proba(
-                    st.session_state.X)
-                if model_predict_proba_output.shape[1] > positive_class_idx_for_proba_main_block:
-                    probabilities_for_borderline = model_predict_proba_output[:,
-                                                                              positive_class_idx_for_proba_main_block]
-
-            borderline_idx = None
-            if len(probabilities_for_borderline) > 0:
-                borderline_idx_pos_in_X = np.argmin(
-                    np.abs(probabilities_for_borderline - 0.5))
-                borderline_idx = st.session_state.X.index[borderline_idx_pos_in_X]
-
-            if borderline_idx is not None:
-                suggested_unique_indices.add(borderline_idx)
-
-            selected_indices_for_local_default = sorted(
-                list(suggested_unique_indices))[:3]
-            if not selected_indices_for_local_default and not st.session_state.X.empty:
-                selected_indices_for_local_default = [
-                    st.session_state.X.index[0]]
-
-        selected_indices_for_local = st.multiselect(
-            "Select Instance IDs from the full dataset (e.g., 0, 1, 2, ...):",
-            options=st.session_state.X.index.tolist(),
-            default=selected_indices_for_local_default,
-            help="Select up to 3 instance IDs for detailed local explanations."
+    if st.button("📦 Export evidence bundle"):
+        out_dir, zip_path = export_bundle(
+            ctx=ctx,
+            X=X,
+            y=y,
+            model=m,
+            global_obj=st.session_state.get("global_obj"),
+            local_obj=st.session_state.get("local_obj"),
+            counterfactual_obj=st.session_state.get("counterfactual_obj"),
+            notes_md=notes_md,
         )
-        st.session_state.instances_for_local_explanation = selected_indices_for_local
+        st.success(f"Export complete: `{out_dir}`")
+        st.caption(f"Zip bundle: `{zip_path}`")
 
-        if st.button("Generate Local Explanations", disabled=not st.session_state.model_loaded or not st.session_state.instances_for_local_explanation):
-            with st.spinner("Generating local SHAP explanations..."):
-                try:
-                    if st.session_state.shap_explainer_for_local is None:
-                        st.session_state.shap_explainer_for_local = shap.TreeExplainer(
-                            st.session_state.model)
-
-                    local_explanations_data, shap_explanations_list = generate_local_shap_explanations(
-                        st.session_state.model,
-                        st.session_state.X,
-                        st.session_state.instances_for_local_explanation,
-                        st.session_state.shap_explainer_for_local,
-                        st.session_state.explanation_dir
-                    )
-                    st.session_state.local_explanations_data = local_explanations_data
-                    st.session_state.shap_explanations_list_for_plots = shap_explanations_list
-                    st.success("Local explanations generated!")
-                except Exception as e:
-                    st.error(f"Error generating local explanations: {e}")
-
-    if st.session_state.local_explanations_data:
-        st.subheader("Local Explanation Details:")
-        for i, (inst_key, explanation_data) in enumerate(st.session_state.local_explanations_data.items()):
-            instance_id = int(inst_key.split('_')[1])
-
-            with st.expander(f"Instance ID: {instance_id} (Predicted Approval Probability: {explanation_data['model_prediction']:.4f})"):
-                # Professional dashboard: Feature values and SHAP values
-                st.markdown("**Feature Values**")
-                feature_df = pd.DataFrame(
-                    [explanation_data['original_features']]).T.rename(columns={0: 'Value'})
-                st.dataframe(feature_df, use_container_width=True)
-
-                st.markdown("**SHAP Value Contributions**")
-                shap_df = pd.DataFrame({
-                    'Feature': list(explanation_data['shap_values'].keys()),
-                    'SHAP Value': list(explanation_data['shap_values'].values())
-                }).sort_values('SHAP Value', key=abs, ascending=False)
-                st.dataframe(shap_df, use_container_width=True)
-
-                st.markdown(
-                    f"**Expected Value (Base):** `{explanation_data['expected_value']:.4f}`")
-                st.metric("Predicted Approval Probability",
-                          f"{explanation_data['model_prediction']:.4f}")
-
-                if st.session_state.shap_explanations_list_for_plots:
-                    try:
-                        current_shap_exp = next((exp for exp in st.session_state.shap_explanations_list_for_plots if np.array_equal(
-                            exp.data, st.session_state.X.loc[instance_id].values)), None)
-                        if current_shap_exp:
-                            fig, ax = plt.subplots(figsize=(10, 6))
-                            shap.waterfall_plot(
-                                current_shap_exp, max_display=10, show=False)
-                            st.pyplot(fig)
-                            plt.close(fig)
-                        else:
-                            st.warning(
-                                f"Could not find SHAP waterfall plot for instance ID {instance_id}. (There might be a mismatch in data used for explanation generation and plotting list).")
-                    except Exception as e:
-                        st.error(
-                            f"Error displaying waterfall plot for instance ID {instance_id}: {e}")
-
-        st.markdown(f"")
-        st.markdown(f"The local SHAP explanations provide critical insights into individual loan decisions. For instance, analyzing the waterfall plot for a *denied* application, I can clearly see that a low `credit_score` and high `debt_to_income` ratio were the primary negative contributors, pushing the loan approval probability below the threshold. Conversely, for an *approved* application, a high `credit_score` and `income` might be the dominant positive factors. For a *borderline* case, the contributions might be more balanced.")
-        st.markdown(f"")
-        st.markdown(
-            f"These detailed breakdowns are invaluable for Anya. They allow her to:")
-        st.markdown(f"1.  **Verify decision logic:** Are the model's specific reasons for a decision coherent and justifiable according to PrimeCredit's policy?")
-        st.markdown(f"2.  **Identify potential biases:** Do certain demographic features (if present) disproportionately influence decisions in specific cases without valid business rationale? (Note: no demographic features are in this sample data, but this is what a Model Validator would look for).")
-        st.markdown(
-            f"3.  **Provide actionable feedback:** Understand what factors led to a denial, which is crucial for communicating with applicants.")
-        st.markdown(f"")
-        st.markdown(f"This level of detail is exactly what PrimeCredit's internal auditors and potentially regulators would require to validate the fairness and transparency of the model.")
-
-# Page 5: 4. Counterfactuals
-elif st.session_state.current_page == "4. Counterfactuals":
-    st.title('5. "What If?": Understanding Counterfactuals for Actionable Insights')
-    st.markdown(f"For a denied loan applicant, merely knowing *why* they were denied (via local explanations) isn't always enough. As Anya, I also need to understand 'what if?' – what minimal changes to their application would have resulted in an approval? This is where counterfactual explanations come in. They identify the smallest, most actionable changes to an applicant's features that would flip the model's decision from denial to approval. This information is invaluable for PrimeCredit Bank, not only for providing constructive feedback to customers but also for potentially refining our lending criteria or identifying areas where applicants can improve their financial standing to become eligible.")
-    st.markdown(
-        r"The objective of generating a counterfactual example $x'$ for an original instance $x$ that results in a different prediction $y'$ is to minimize the distance between $x$ and $x'$, subject to the constraint that $x'$ belongs to the feasible input space $\mathcal{{X}}$ and the model $f$ predicts $y'$ for $x'$. This can be formalized as:")
-    st.markdown(
-        r"$$ \min_{{x'}} \text{{distance}}(x, x') \quad \text{{s.t.}} \quad f(x') = y' \quad \text{{and}} \quad x' \in \mathcal{{X}} $$")
-    st.markdown(
-        r"where $\text{{distance}}(x, x')$ is a measure of proximity (e.g., L1 or L2 norm), and $f(x')$ is the model's prediction for the counterfactual instance $x'$.")
-    st.markdown(f"")
-
-    if st.session_state.data_loaded and not st.session_state.X.empty and not st.session_state.y.empty:
-        st.subheader("Select a Denied Instance for Counterfactual Generation")
-
-        denied_indices = st.session_state.y[st.session_state.y == 0].index
-        denied_instance_options = denied_indices.tolist() if not denied_indices.empty else []
-
-        if not denied_instance_options:
-            st.warning(
-                "No 'denied' instances found in the dataset to generate counterfactuals. Cannot proceed.")
-            st.session_state.denied_instance_for_cf_idx = None
-        else:
-            default_denied_idx = denied_instance_options[0] if denied_instance_options else None
-            default_index_to_select = denied_instance_options.index(
-                default_denied_idx) if default_denied_idx in denied_instance_options else 0
-
-            st.session_state.denied_instance_for_cf_idx = st.selectbox(
-                "Select a denied instance ID:",
-                options=denied_instance_options,
-                index=default_index_to_select,
-                help="Choose an instance where the loan was denied to see what minimal changes would approve it."
-            )
-
-        if st.button("Generate Counterfactual Example", disabled=not st.session_state.model_loaded or st.session_state.denied_instance_for_cf_idx is None):
-            with st.spinner("Generating counterfactual explanation... This might take a moment."):
-                try:
-                    counterfactual_data = generate_counterfactual_explanation(
-                        st.session_state.model,
-                        st.session_state.X,
-                        st.session_state.feature_names,
-                        st.session_state.denied_instance_for_cf_idx,
-                        1,
-                        st.session_state.explanation_dir
-                    )
-                    st.session_state.counterfactual_result = counterfactual_data
-                    if counterfactual_data:
-                        st.success("Counterfactual example generated!")
-                    else:
-                        st.info(
-                            "No counterfactuals found for the selected instance with desired class 1.")
-                except Exception as e:
-                    st.error(f"Error generating counterfactuals: {e}")
-    else:
-        st.warning(
-            "Please load a model and data first on the 'Upload & Configure' page.")
-
-    if st.session_state.counterfactual_result:
-        st.subheader("Counterfactual Analysis:")
-        cf_res = st.session_state.counterfactual_result
-        if cf_res:
-            st.markdown("#### Original Instance Features")
-            orig_inst = cf_res.get('original_instance', {})
-            if orig_inst:
-                st.dataframe(pd.DataFrame([orig_inst]).T.rename(
-                    columns={0: 'Value'}), use_container_width=True)
-            st.metric("Original Prediction Probability (desired class 1)",
-                      f"{cf_res.get('original_prediction_prob_desired_class', 0.0):.4f}")
-
-            st.markdown("#### Counterfactual Instance Features")
-            cf_inst = cf_res.get('counterfactual_instance', {})
-            if cf_inst:
-                st.dataframe(pd.DataFrame([cf_inst]).T.rename(
-                    columns={0: 'Value'}), use_container_width=True)
-            st.metric("Counterfactual Prediction Probability (desired class 1)",
-                      f"{cf_res.get('counterfactual_prediction_prob_desired_class', 0.0):.4f}")
-
-            st.markdown("#### Features Changed to Flip Prediction")
-            changed = cf_res.get('features_changed')
-            if changed:
-                changed_df = pd.DataFrame([{
-                    'Feature': k,
-                    'Original Value': v['original_value'],
-                    'Counterfactual Value': v['counterfactual_value']
-                } for k, v in changed.items()])
-                st.dataframe(changed_df, use_container_width=True)
-            else:
-                st.info(
-                    "No features needed to be changed (or none found) to flip the prediction to the desired class for this instance.")
-        else:
-            st.info("No counterfactual data available to display.")
-
-        st.markdown(f"")
-        st.markdown(f"The counterfactual analysis provides invaluable 'what-if' scenarios for PrimeCredit Bank. For the selected denied loan application, the `counterfactual_result` clearly shows that increasing the `credit_score` by a certain amount or raising the `income` significantly, for example, would have resulted in the loan being approved. The `features_changed` dictionary pinpoints the minimal adjustments needed.")
-        st.markdown(f"")
-        st.markdown(f"This empowers Anya to:")
-        st.markdown(f"1.  **Inform customers:** Instead of just saying 'your loan was denied,' PrimeCredit can advise applicants on specific, actionable steps (e.g., 'If your credit score improved by X points, you would likely be approved').")
-        st.markdown(f"2.  **Refine policy:** If generating counterfactuals consistently highlights specific features as critical for flipping decisions, it might indicate areas for policy review or for developing financial literacy programs for customers.")
-        st.markdown(f"3.  **Assess model sensitivity:** It reveals how sensitive the model is to changes in specific features, which is a key part of model validation.")
-        st.markdown(f"")
-        st.markdown(f"This concrete evidence of actionable insights is crucial for establishing trust and demonstrating the model's utility beyond just making a prediction.")
-
-# Page 6: 5. Validation Summary
-elif st.session_state.current_page == "5. Validation Summary":
-    st.title("6. Identifying Gaps: Interpretability Analysis and Validation Findings")
-    st.markdown(f"After reviewing the global, local, and counterfactual explanations, Anya must now synthesize her findings and identify any interpretability gaps that could prevent the CAM v1.2 from being approved for deployment. This is a critical step for PrimeCredit Bank's risk management framework. An interpretability gap might be a feature that, while statistically significant, lacks a clear business rationale, or cases where local explanations seem inconsistent. I need to document my observations, evaluate the model's transparency, and make a recommendation for its deployment or further refinement.")
-    st.markdown(f"")
-    st.markdown(f"My analysis will focus on:")
-    st.markdown(f"-   **Coherence with Policy:** Do the explanations align with PrimeCredit's established lending policies and regulations?")
-    st.markdown(f"-   **Transparency:** Are the reasons for decisions clear, concise, and easily understandable by non-technical stakeholders (e.g., loan officers, customers, auditors)?")
-    st.markdown(
-        f"-   **Consistency:** Do similar cases receive similar explanations, and are there any anomalous explanations?")
-    st.markdown(
-        f"-   **Actionability:** Do counterfactuals provide practical advice for applicants?")
-    st.markdown(f"")
-    st.markdown(
-        f"Based on these, I will formulate a summary of my findings and a recommendation.")
-    st.markdown(f"")
-
-    if st.button("Generate Validation Summary", disabled=(st.session_state.global_importance_df.empty and not st.session_state.local_explanations_data and not st.session_state.counterfactual_result)):
-        with st.spinner("Generating explanation summary..."):
-            try:
-                summary_content = generate_explanation_summary(
-                    st.session_state.global_importance_df,
-                    st.session_state.local_explanations_data,
-                    st.session_state.counterfactual_result,
-                    st.session_state.explanation_dir
-                )
-                st.session_state.explanation_summary_md = summary_content
-                st.success("Validation summary generated!")
-            except Exception as e:
-                st.error(f"Error generating validation summary: {e}")
-
-    if st.session_state.explanation_summary_md:
-        st.subheader("Validation Summary Report:")
-        st.markdown(st.session_state.explanation_summary_md)
-        st.markdown(f"")
-        st.markdown(f"**Note on Hashes in Summary:** Due to strict constraints on modifying `source.py` functions, the model and data hashes displayed directly within this markdown summary (`explanation_summary.md`) are derived from the initial load of `sample_credit_model.pkl` and `sample_credit_data.csv` when `source.py` is first imported. For the *actual* audit-ready hashes of your dynamically uploaded model and data, please refer to the `config_snapshot.json` within the exported artifact bundle.")
-
-        st.markdown(f"")
-        st.markdown(f"The `explanation_summary.md` document captures Anya's comprehensive analysis. It consolidates findings from global importance, local decision breakdowns, and counterfactual scenarios. Crucially, it identifies specific 'interpretability gaps' – areas where explanations might be less straightforward or require further context – such as opaque feature interactions or explanations for borderline cases. For each gap, Anya has provided a pragmatic recommendation for PrimeCredit Bank, demonstrating a proactive approach to risk management.")
-        st.markdown(f"")
-        st.markdown(f"By clearly documenting these observations and providing a recommendation (in this case, approval with caveats), Anya fulfills her role as a Model Validator. This structured summary serves as a primary artifact for review by the Internal Audit team and senior leadership, enabling them to make an informed decision on the CAM v1.2's production readiness with a full understanding of its explainability profile.")
-
-# Page 7: 6. Export Artifacts
-elif st.session_state.current_page == "6. Export Artifacts":
-    st.title("7. Audit Trail: Reproducibility and Artifact Bundling")
-    st.markdown(f"The final, critical step for Anya is to ensure that all her validation work is reproducible and securely bundled for auditing purposes. For PrimeCredit Bank, regulatory compliance demands an immutable record of all explanation artifacts, along with the configuration and hashes that guarantee their traceability to specific model and data versions. This 'audit-ready artifact bundle' acts as indisputable evidence of the model validation process. I will consolidate all generated explanations, configuration details, and an `evidence_manifest.json` containing SHA-256 hashes of each file, into a single, timestamped ZIP archive.")
-    st.markdown(r"The `evidence_manifest.json` will list each generated file and its corresponding SHA-256 hash. The SHA-256 hash function takes an input (e.g., a file's content) and produces a fixed-size, 256-bit (32-byte) hexadecimal string. Even a minuscule change to the input will result in a completely different hash, making it an excellent tool for verifying data integrity:")
-    st.markdown(
-        r"$$ \text{{SHA-256}}(\text{{file\_content}}) = \text{{hexadecimal\_hash\_string}} $$")
-    st.markdown(f"")
-
-    if st.button("Generate & Bundle All Audit Artifacts", type="primary", disabled=not st.session_state.model_loaded):
-        with st.spinner("Generating configuration, manifest, and bundling artifacts..."):
-            try:
-                os.makedirs(st.session_state.explanation_dir, exist_ok=True)
-
-                config_file_path = create_config_snapshot(
-                    st.session_state.model_hash,
-                    st.session_state.data_hash,
-                    st.session_state.RANDOM_SEED,
-                    st.session_state.explanation_dir
-                )
-
-                output_files_candidates = [
-                    os.path.join(st.session_state.explanation_dir,
-                                 'global_explanation.json'),
-                    os.path.join(st.session_state.explanation_dir,
-                                 'local_explanation.json'),
-                    os.path.join(st.session_state.explanation_dir,
-                                 'counterfactual_example.json'),
-                    os.path.join(st.session_state.explanation_dir,
-                                 'explanation_summary.md'),
-                    config_file_path
-                ]
-                st.session_state.output_files_to_bundle = [
-                    f for f in output_files_candidates if os.path.exists(f)]
-
-                manifest_file_path = create_evidence_manifest(
-                    st.session_state.explanation_dir,
-                    st.session_state.output_files_to_bundle
-                )
-                st.session_state.output_files_to_bundle.append(
-                    manifest_file_path)
-
-                zip_archive_path = bundle_artifacts_to_zip(
-                    st.session_state.explanation_dir, st.session_state.run_id)
-                st.session_state.zip_archive_path = zip_archive_path
-                st.success(
-                    f"All audit-ready artifacts bundled into: `{zip_archive_path}`")
-            except Exception as e:
-                st.error(f"Error bundling artifacts: {e}")
-
-    if st.session_state.zip_archive_path and os.path.exists(st.session_state.zip_archive_path):
-        with open(st.session_state.zip_archive_path, "rb") as fp:
+        with open(zip_path, "rb") as f:
             st.download_button(
-                label="Download Audit-Ready Artifact Bundle",
-                data=fp.read(),
-                file_name=os.path.basename(st.session_state.zip_archive_path),
+                label="Download Session_05 bundle (zip)",
+                data=f,
+                file_name=os.path.basename(zip_path),
                 mime="application/zip",
-                help="Download a ZIP file containing all explanation artifacts, configuration, and evidence manifest."
             )
-        st.markdown(f"")
-        st.markdown(
-            f"The final stage of the validation workflow is complete. I have successfully generated a comprehensive set of explanation artifacts, including global and local SHAP analyses, counterfactual examples, and my detailed summary report. Each of these documents, along with a snapshot of the configuration (including model and data hashes) and a manifest of all files with their individual SHA-256 hashes, has been meticulously bundled into a timestamped ZIP archive: `{os.path.basename(st.session_state.zip_archive_path)}`.")
-        st.markdown(f"")
-        st.markdown(
-            f"This single, self-contained archive is PrimeCredit Bank's **audit-ready artifact bundle**. It ensures:")
-        st.markdown(f"1.  **Reproducibility:** The `config_snapshot.json` captures all parameters needed to regenerate these explanations, including the exact model and data hashes.")
-        st.markdown(f"2.  **Traceability:** The `evidence_manifest.json` provides cryptographic proof of the integrity and origin of each artifact, linking them directly to the validated model and data versions.")
-        st.markdown(f"3.  **Compliance:** All necessary documentation for internal auditors, regulators, and senior stakeholders is readily available and verifiable, significantly reducing regulatory risk and building trust in the AI system.")
-        st.markdown(f"")
-        st.markdown(f"This completes my model validation task for CAM v1.2, providing PrimeCredit Bank with the necessary confidence to proceed with its deployment, knowing its decisions are explainable, transparent, and auditable.")
 
 
-# License
-st.caption('''
----
-## QuantUniversity License
+def appendix_page():
+    st.header("9) Appendix — Troubleshooting & Notes")
+    st.markdown(
+        """
+### Required libraries
 
-© QuantUniversity 2025  
-This notebook was created for **educational purposes only** and is **not intended for commercial use**.  
+This lab requires:
+- `streamlit`
+- `pandas`, `numpy`
+- `scikit-learn`
+- `matplotlib`
+- `shap`
+- `lime`
 
-- You **may not copy, share, or redistribute** this notebook **without explicit permission** from QuantUniversity.  
-- You **may not delete or modify this license cell** without authorization.  
-- This notebook was generated using **QuCreate**, an AI-powered assistant.  
-- Content generated by AI may contain **hallucinated or incorrect information**. Please **verify before using**.  
+If SHAP or LIME are missing, install and restart:
 
-All rights reserved. For permissions or commercial licensing, contact: [info@qusandbox.com](mailto:info@qusandbox.com)
-''')
+```bash
+pip install shap lime
+````
+
+### Method selection logic (as implemented)
+
+* Tree model → SHAP TreeExplainer
+* Linear model → SHAP LinearExplainer
+* Black-box model → permutation importance (global) + LIME (local)
+
+### Why the dataset is generated
+
+The spec calls for sample data + sample models that ship with the application.
+Here we generate a deterministic “credit-like” dataset and train baseline models at runtime
+to preserve backend loading + reproducibility.
+"""
+    )
+
+
+def footer():
+
+    st.divider()
+    st.write("© 2025 QuantUniversity. All Rights Reserved.")
+    st.caption(
+        "The purpose of this demonstration is solely for educational use and illustration. "
+        "Any reproduction of this demonstration requires prior written consent from QuantUniversity."
+    )
+    st.caption(
+        "This lab was generated using the QuCreate platform. QuCreate relies on AI models for generating code, "
+        "which may contain inaccuracies or errors."
+    )
+
+# ---------------------------
+
+# Main
+
+# ---------------------------
+
+
+def main():
+
+    set_seeds(int(st.session_state.get("seed", DEFAULT_SEED)))
+
+    X, y = load_sample_credit_data(
+        seed=int(st.session_state.get("seed", DEFAULT_SEED)))
+    models = train_baseline_models(X, y, seed=int(
+        st.session_state.get("seed", DEFAULT_SEED)))
+
+    page, ctx = sidebar_controls(models)
+
+    if "created_utc" not in st.session_state:
+        st.session_state["created_utc"] = _utc_now_iso()
+
+    if page.startswith("0)"):
+        mission_brief_page()
+    elif page.startswith("1)"):
+        persona_story_page()
+    elif page.startswith("2)"):
+        data_model_page(X, y, models, ctx)
+    elif page.startswith("3)"):
+        global_explanation_page(X, y, models, ctx)
+    elif page.startswith("4)"):
+        local_explanation_shap_page(X, y, models, ctx)
+    elif page.startswith("5)"):
+        local_explanation_lime_page(X, y, models, ctx)
+    elif page.startswith("6)"):
+        counterfactual_page(X, y, models, ctx)
+    elif page.startswith("7)"):
+        reproducibility_page(X, y, models, ctx)
+    elif page.startswith("8)"):
+        export_page(X, y, models, ctx)
+
+    footer()
+
+
+if __name__ == "__main__":
+    main()
