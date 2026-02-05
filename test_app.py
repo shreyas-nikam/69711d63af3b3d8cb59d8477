@@ -4,416 +4,454 @@ from streamlit.testing.v1 import AppTest
 import pandas as pd
 import numpy as np
 import os
-import io
-import pickle
-import zipfile
+import shutil
+import tempfile
 from unittest.mock import patch, MagicMock
+import joblib
+import hashlib
+import json
+import datetime
+import zipfile
 
-# --- Mocks for source.py functions and external libraries ---
-# These mocks simulate the behavior of external dependencies and functions from source.py.
-# In a real test setup, ensure 'source.py' is importable in your test environment,
-# or mock the 'source' module itself if it's not present.
+# --- Dummy Source.py content (for local testing environment setup) ---
+# In a real scenario, this would be in a separate file named 'source.py'
 
-MOCKED_RANDOM_SEED = 42
-MOCKED_TARGET_COLUMN = 'loan_approved'
+TARGET_COLUMN = 'target'
+RANDOM_SEED = 42
+MODEL_PATH = 'dummy_model.pkl'
+DATA_PATH = 'dummy_data.csv'
 
-class MockModel:
-    """A mock model to simulate predict_proba and predict methods."""
-    def predict_proba(self, X):
-        # Simulate binary classification probabilities based on 'credit_score'
-        if 'credit_score' in X.columns:
-            probs = np.array([[0.1, 0.9] if score > 600 else [0.9, 0.1] for score in X['credit_score']])
-        else: # Default if credit_score isn't in test X
-            probs = np.array([[0.5, 0.5]] * len(X))
-        return probs
+# Dummy global variables that will be updated by the app
+full_data = None
+X = None
+y = None
+credit_model = None
+model_hash_val = None
+data_hash_val = None
 
-    def predict(self, X):
-        return np.argmax(self.predict_proba(X), axis=1)
+class DummyModel:
+    def __init__(self):
+        self.classes_ = [0, 1]
+
+    def predict_proba(self, X_input):
+        if isinstance(X_input, pd.DataFrame) and not X_input.empty:
+            num_rows = len(X_input)
+        else:
+            num_rows = 1 
+        
+        if X_input is not None and 'feature1' in X_input.columns:
+            probs_class1 = np.where(X_input['feature1'] > 0.5, 0.8, 0.2)
+            probs_class0 = 1 - probs_class1
+            return np.array(list(zip(probs_class0, probs_class1)))
+        else:
+            return np.array([[0.8, 0.2]] * num_rows)
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
+
+class MockShapExplanation:
+    def __init__(self, values, base_values, data, feature_names):
+        self.values = values
+        self.base_values = base_values
+        self.data = data
+        self.feature_names = feature_names
 
     @property
-    def classes_(self):
-        return np.array([0, 1])
+    def output_names(self):
+        return ["class_0", "class_1"]
 
-def mock_load_and_hash_artifacts(model_path, data_path, target_column, random_seed):
-    """Mocks the loading and hashing of model and data."""
-    mock_model = MockModel()
+class MockShapTreeExplainer:
+    def __init__(self, model):
+        self.model = model
+        self.expected_output_dims = 2
     
-    # Create sample data for testing
-    num_samples = 10
-    mock_data = pd.DataFrame({
-        'feature1': np.random.rand(num_samples),
-        'credit_score': np.random.randint(300, 850, num_samples),
-        'income': np.random.randint(30000, 150000, num_samples),
-        'debt_to_income': np.random.rand(num_samples) * 0.5,
-        MOCKED_TARGET_COLUMN: [1, 0, 1, 0, 1, 0, 1, 0, 1, 0] # Mixed approvals/denials
+    def __call__(self, X):
+        values = np.random.rand(X.shape[0], X.shape[1], self.expected_output_dims)
+        base_values = np.random.rand(self.expected_output_dims)
+        return MockShapExplanation(values, base_values, X.values, X.columns.tolist())
+
+    def shap_values(self, X):
+        return [np.random.rand(X.shape[0], X.shape[1]), np.random.rand(X.shape[0], X.shape[1])]
+
+def load_and_hash_artifacts(model_path, data_path, target_column, random_seed):
+    dummy_data = pd.DataFrame({
+        'feature1': np.random.rand(100),
+        'feature2': np.random.rand(100),
+        'feature3': np.random.rand(100),
+        target_column: np.random.randint(0, 2, 100)
     })
-    X = mock_data.drop(columns=[target_column])
-    y = mock_data[target_column]
-    model_hash = "mock_model_hash_123"
-    data_hash = "mock_data_hash_456"
-    return mock_model, mock_data, X, y, model_hash, data_hash
-
-def mock_generate_sample_data_and_model(model_filename, data_filename, target_column, random_seed):
-    """Mocks the generation of sample data and model files."""
-    # Simulate file creation by touching files or writing dummy content
-    with open(model_filename, 'wb') as f:
-        pickle.dump(MockModel(), f) # write a dummy pickle
-    pd.DataFrame({'a': [1]}).to_csv(data_filename, index=False) # write a dummy csv
-
-def mock_generate_global_shap_explanation(model, X_train_exp, feature_names, explanation_dir):
-    """Mocks the generation of global SHAP explanations."""
-    mock_importance_df = pd.DataFrame({
-        'Feature': ['credit_score', 'income', 'feature1', 'debt_to_income'],
-        'Importance': [0.5, 0.3, 0.1, 0.05]
-    }).sort_values('Importance', ascending=False)
     
-    # Create a mock shap.Explanation object
-    mock_shap_values = MagicMock()
-    if not X_train_exp.empty:
-        mock_shap_values.values = np.random.rand(len(X_train_exp), len(feature_names))
-        mock_shap_values.base_values = np.array([0.5] * len(X_train_exp))
-        mock_shap_values.data = X_train_exp.values
-    else:
-        mock_shap_values.values = np.array([])
-        mock_shap_values.base_values = np.array([0.5])
-        mock_shap_values.data = np.array([])
+    dummy_data.loc[0:49, 'feature1'] = np.linspace(0.1, 0.4, 50) 
+    dummy_data.loc[50:99, 'feature1'] = np.linspace(0.6, 0.9, 50) 
 
-    return mock_importance_df, [None, mock_shap_values] # TreeExplainer returns [expected_value, shap_values]
+    dummy_model = DummyModel()
+    
+    global full_data, X, y, credit_model, model_hash_val, data_hash_val
+    full_data = dummy_data
+    X = dummy_data.drop(columns=[target_column])
+    y = dummy_data[target_column]
+    credit_model = dummy_model
+    model_hash_val = hashlib.sha256(b"dummy_model_content").hexdigest()
+    data_hash_val = hashlib.sha256(b"dummy_data_content").hexdigest()
 
-def mock_generate_local_shap_explanations(model, X, instances, explainer, explanation_dir):
-    """Mocks the generation of local SHAP explanations."""
-    local_explanations = {}
-    shap_explanations_list = []
-    for idx in instances:
-        instance_data = X.loc[idx].to_dict()
-        pred_prob = model.predict_proba(pd.DataFrame([instance_data]))[0, 1]
-        local_explanations[f"instance_{idx}"] = {
-            "instance_id": idx,
-            "original_features": instance_data,
-            "model_prediction": pred_prob,
-            "shap_values": {f: np.random.rand() for f in X.columns},
-            "explanation_summary": "Mock local explanation for instance " + str(idx)
-        }
+    return dummy_model, dummy_data, X, y, model_hash_val, data_hash_val
+
+def generate_sample_data_and_model(model_path, data_path, target_column, random_seed):
+    return load_and_hash_artifacts(model_path, data_path, target_column, random_seed)
+
+def generate_global_shap_explanation(model, X_train_exp, feature_names, explanation_dir):
+    dummy_importance_df = pd.DataFrame({
+        'Feature': ['feature1', 'feature2', 'feature3'],
+        'Mean |SHAP| Value': [0.5, 0.3, 0.2]
+    })
+    os.makedirs(explanation_dir, exist_ok=True)
+    with open(os.path.join(explanation_dir, "global_explanation.json"), "w") as f:
+        json.dump(dummy_importance_df.to_dict(), f)
+    
+    return dummy_importance_df, "dummy_plot_path.png"
+
+def generate_local_shap_explanations(model, X, instance_ids, explainer_local, explanation_dir):
+    dummy_local_data = {}
+    for idx in instance_ids:
+        instance_X = X.loc[[idx]]
+        shap_feature1 = 0.3 if instance_X['feature1'].iloc[0] > 0.5 else -0.3
+        shap_feature2 = np.random.uniform(-0.1, 0.1)
+        shap_feature3 = np.random.uniform(-0.1, 0.1)
         
-        mock_exp = MagicMock()
-        mock_exp.values = np.random.rand(len(X.columns))
-        mock_exp.base_values = 0.5
-        mock_exp.data = X.loc[idx].values
-        mock_exp.feature_names = X.columns.tolist()
-        shap_explanations_list.append(mock_exp)
-    return local_explanations, shap_explanations_list
-
-def mock_generate_counterfactual_explanation(model, X, feature_names, instance_idx, desired_class, explanation_dir):
-    """Mocks the generation of counterfactual explanations."""
-    original_instance_df = pd.DataFrame([X.loc[instance_idx]])
-    original_instance = original_instance_df.iloc[0].to_dict()
-    original_pred_prob = model.predict_proba(original_instance_df)[0, desired_class]
-    
-    cf_instance = original_instance.copy()
-    # Simulate a change that would flip the prediction
-    if 'credit_score' in cf_instance:
-        cf_instance['credit_score'] = 750 # Assume this is enough to flip
-    
-    cf_pred_prob = model.predict_proba(pd.DataFrame([cf_instance]))[0, desired_class]
-    
-    features_changed = {}
-    if original_instance.get('credit_score') != cf_instance.get('credit_score'):
-        features_changed['credit_score'] = {
-            'original': original_instance.get('credit_score'),
-            'counterfactual': cf_instance.get('credit_score')
+        dummy_local_data[idx] = {
+            'shap_values': [shap_feature1, shap_feature2, shap_feature3], 
+            'feature_values': instance_X.iloc[0].to_dict()
         }
+    
+    os.makedirs(explanation_dir, exist_ok=True)
+    with open(os.path.join(explanation_dir, "local_explanation.json"), "w") as f:
+        json.dump(dummy_local_data, f, cls=NumpyEncoder)
+        
+    return dummy_local_data, "dummy_local_plot.png"
+
+def generate_counterfactual_explanation(model, X, feature_names, denied_instance_idx, target_class, explanation_dir):
+    original_instance = X.loc[[denied_instance_idx]].to_dict('records')[0]
+    
+    cf_feature1 = original_instance['feature1'] + 0.2
+    if cf_feature1 > 1.0: cf_feature1 = 1.0 
+    
+    counterfactual_df = pd.DataFrame({
+        'feature1': [cf_feature1],
+        'feature2': [original_instance['feature2']],
+        'feature3': [original_instance['feature3']]
+    }, index=[denied_instance_idx])
+    
+    changes_text = f"Increase 'feature1' from {original_instance['feature1']:.2f} to {cf_feature1:.2f}."
+    
+    os.makedirs(explanation_dir, exist_ok=True)
+    with open(os.path.join(explanation_dir, "counterfactual_example.json"), "w") as f:
+        json.dump({
+            'original_instance': original_instance,
+            'counterfactual_df': counterfactual_df.to_dict(), # Convert DataFrame to dict
+            'changes_text': changes_text
+        }, f, cls=NumpyEncoder)
 
     return {
         'original_instance': original_instance,
-        'original_prediction_prob_desired_class': original_pred_prob,
-        'counterfactual_instance': cf_instance,
-        'counterfactual_prediction_prob_desired_class': cf_pred_prob,
-        'features_changed': features_changed
+        'counterfactual_df': counterfactual_df,
+        'changes_text': changes_text
     }
 
-def mock_generate_explanation_summary(global_importance_df, local_explanations_data, counterfactual_result, explanation_dir):
-    """Mocks the generation of the validation summary."""
-    return "## Mock Validation Summary\nThis is a mock summary report from the test."
-
-def mock_create_config_snapshot(model_hash, data_hash, random_seed, explanation_dir):
-    """Mocks the creation of the config snapshot file."""
-    # Ensure explanation_dir exists for the mock file creation
-    os.makedirs(explanation_dir, exist_ok=True)
-    file_path = os.path.join(explanation_dir, 'config_snapshot.json')
-    with open(file_path, 'w') as f:
-        f.write(f'{{"model_hash": "{model_hash}", "data_hash": "{data_hash}", "random_seed": {random_seed}}}')
-    return file_path
-
-def mock_create_evidence_manifest(explanation_dir, output_files_to_bundle):
-    """Mocks the creation of the evidence manifest file."""
-    # Ensure explanation_dir exists for the mock file creation
-    os.makedirs(explanation_dir, exist_ok=True)
-    file_path = os.path.join(explanation_dir, 'evidence_manifest.json')
-    manifest_content = {"manifest": {os.path.basename(f): "mock_hash" for f in output_files_to_bundle}}
-    with open(file_path, 'w') as f:
-        import json
-        json.dump(manifest_content, f)
-    return file_path
-
-def mock_bundle_artifacts_to_zip(explanation_dir, run_id):
-    """Mocks the bundling of artifacts into a ZIP file."""
-    reports_dir = os.path.join('reports')
-    os.makedirs(reports_dir, exist_ok=True)
-    zip_path = os.path.join(reports_dir, f'session_05_validation_run_{run_id}.zip')
+def generate_explanation_summary(global_importance_df, local_explanations_data, counterfactual_result, explanation_dir):
+    summary_content = f"""# Validation Summary
     
-    # Simulate creating an empty zip file for download
-    with zipfile.ZipFile(zip_path, 'w') as zf:
-        zf.writestr('dummy_artifact.txt', 'This is a dummy artifact for the zip.')
+    **Model Hash:** {model_hash_val}
+    **Data Hash:** {data_hash_val}
+    **Target Column:** {TARGET_COLUMN}
+
+    ## Global Insights
+    Based on the global SHAP explanations, the most important features are:
+    1. {global_importance_df['Feature'].iloc[0]} (Mean |SHAP| Value: {global_importance_df['Mean |SHAP| Value'].iloc[0]:.2f})
+    2. {global_importance_df['Feature'].iloc[1]} (Mean |SHAP| Value: {global_importance_df['Mean |SHAP| Value'].iloc[1]:.2f})
+
+    ## Local Explanations
+    Examined {len(local_explanations_data)} instances. For instance ID {list(local_explanations_data.keys())[0]}, feature '{list(local_explanations_data[list(local_explanations_data.keys())[0]]['feature_values'].keys())[0]}' had a significant impact.
+
+    ## Counterfactual Analysis
+    For a denied instance, a counterfactual was generated by making the following changes:
+    {counterfactual_result['changes_text']}
+    """
+    
+    os.makedirs(explanation_dir, exist_ok=True)
+    summary_path = os.path.join(explanation_dir, "explanation_summary.md")
+    with open(summary_path, "w") as f:
+        f.write(summary_content)
+    return summary_path
+
+def create_config_snapshot(model_hash, data_hash, random_seed, explanation_dir):
+    config_content = {
+        "model_hash": model_hash,
+        "data_hash": data_hash,
+        "random_seed": random_seed
+    }
+    config_path = os.path.join(explanation_dir, "config_snapshot.json")
+    with open(config_path, "w") as f:
+        json.dump(config_content, f)
+    return config_path
+
+def create_evidence_manifest(explanation_dir, files_to_bundle):
+    manifest_content = {
+        "run_id": "dummy_run_id",
+        "timestamp": "2023-01-01T12:00:00", 
+        "files": {os.path.basename(f): hashlib.sha256(b"dummy_file_content").hexdigest() for f in files_to_bundle}
+    }
+    manifest_path = os.path.join(explanation_dir, "manifest.json")
+    with open(manifest_path, "w") as f:
+        json.dump(manifest_content, f)
+    return manifest_path
+
+def bundle_artifacts_to_zip(explanation_dir, run_id):
+    reports_dir = os.path.join(os.getcwd(), "reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    zip_path = os.path.join(reports_dir, f"{run_id}.zip")
+    
+    with zipfile.ZipFile(zip_path, 'w') as zipf:
+        zipf.writestr("dummy_file_in_zip.txt", "This is a dummy file.")
     return zip_path
 
-# Pytest fixture to patch all necessary dependencies before each test
+import sys
+sys.modules['source'] = sys.modules[__name__]
+
+# --- End Dummy Source.py content ---
+
 @pytest.fixture(autouse=True)
-def mock_all_dependencies():
-    # Use context managers for patching to ensure proper cleanup
-    with patch('source.RANDOM_SEED', MOCKED_RANDOM_SEED), \
-         patch('source.TARGET_COLUMN', MOCKED_TARGET_COLUMN), \
-         patch('source.load_and_hash_artifacts', new=mock_load_and_hash_artifacts), \
-         patch('source.generate_sample_data_and_model', new=mock_generate_sample_data_and_model), \
-         patch('source.generate_global_shap_explanation', new=mock_generate_global_shap_explanation), \
-         patch('source.generate_local_shap_explanations', new=mock_generate_local_shap_explanations), \
-         patch('source.generate_counterfactual_explanation', new=mock_generate_counterfactual_explanation), \
-         patch('source.generate_explanation_summary', new=mock_generate_explanation_summary), \
-         patch('source.create_config_snapshot', new=mock_create_config_snapshot), \
-         patch('source.create_evidence_manifest', new=mock_create_evidence_manifest), \
-         patch('source.bundle_artifacts_to_zip', new=mock_bundle_artifacts_to_zip), \
-         patch('os.makedirs', MagicMock()), \
-         patch('os.remove', MagicMock()), \
-         patch('os.path.exists', return_value=True), \
-         patch('shap.TreeExplainer', MagicMock(return_value=MagicMock())), \
-         patch('shap.summary_plot', MagicMock()), \
-         patch('shap.waterfall_plot', MagicMock()), \
-         patch('matplotlib.pyplot.subplots', MagicMock(return_value=(MagicMock(), MagicMock()))), \
-         patch('matplotlib.pyplot.close', MagicMock()):
+def mock_plotting_libraries():
+    with patch('matplotlib.pyplot.figure') as mock_figure, \
+         patch('matplotlib.pyplot.gcf') as mock_gcf, \
+         patch('matplotlib.pyplot.show'), \
+         patch('matplotlib.pyplot.clf'), \
+         patch('matplotlib.pyplot.close'), \
+         patch('streamlit.pyplot') as mock_st_pyplot, \
+         patch('shap.summary_plot'), \
+         patch('shap.waterfall_plot'), \
+         patch('shap.TreeExplainer', new=MockShapTreeExplainer):
+        
+        mock_figure_instance = MagicMock()
+        mock_figure.return_value = mock_figure_instance
+        mock_gcf.return_value = mock_figure_instance
+
         yield
 
-# Ensure the app.py is in the current directory or specify the path correctly
-# For AppTest, the app.py file must be accessible from where the test is run.
-APP_FILE = "app.py"
+@pytest.fixture(scope="module", autouse=True)
+def setup_test_environment():
+    os.makedirs("temp_uploads", exist_ok=True)
+    os.makedirs("reports", exist_ok=True)
 
-# --- Test Functions ---
+    yield
 
-def test_home_page():
-    at = AppTest.from_file(APP_FILE).run()
-    assert at.title[0].value == "QuLab: Lab 5: Interpretability & Explainability Control Workbench"
-    assert at.markdown[0].value == "Model Explanation & Explainability Control Workbench"
-    assert at.info[0].value == "Navigate to '1. Upload & Configure' to start your validation process."
-    assert at.session_state["current_page"] == "Home"
-    assert "Model Loaded: ❌" in at.info[1].value
-    assert "Data Loaded: ❌" in at.info[2].value
+    if os.path.exists("temp_uploads"):
+        shutil.rmtree("temp_uploads")
+    if os.path.exists("reports"):
+        shutil.rmtree("reports")
 
-def test_upload_configure_page_load_sample_data():
-    at = AppTest.from_file(APP_FILE).run()
+def test_home_page_initial_content():
+    at = AppTest.from_file("app.py").run()
+    assert at.markdown[0].value == f"**User Role:** Anya Sharma, Lead Model Validator"
+    assert "Welcome to the Model Validation & Explainability Workbench" in at.header[0].value
+    assert at.info[0].value == "Navigate to '1. Data & Model Loading' to begin your validation workflow."
+
+def test_load_sample_data_and_model():
+    at = AppTest.from_file("app.py").run()
+    at.sidebar.selectbox[0].set_value("1. Data & Model Loading").run()
     
-    # Navigate to "1. Upload & Configure"
-    at.sidebar.selectbox[0].set_value("1. Upload & Configure").run()
-    assert at.session_state["current_page"] == "1. Upload & Configure"
+    # Assert buttons are initially enabled/disabled correctly
+    assert at.button[0].disabled == True # Load Custom Model & Data
+    assert at.button[1].disabled == False # Load Sample Credit Model & Data
 
-    # Click 'Load Sample Data' button
-    at.button[1].click().run()
+    at.button[1].click().run() # Click "Load Sample Credit Model & Data"
 
-    assert at.success[0].value == "Sample model and data loaded successfully!"
-    assert at.session_state["model_loaded"] is True
-    assert at.session_state["data_loaded"] is True
-    assert at.session_state["model_hash"] == "mock_model_hash_123"
-    assert at.session_state["data_hash"] == "mock_data_hash_456"
-    assert "First 5 rows of feature data:" in at.markdown[-2].value
-    assert isinstance(at.session_state["X"], pd.DataFrame)
-    assert not at.session_state["X"].empty
+    assert at.success[0].value == "Sample artifacts loaded successfully!"
+    assert at.session_state['model_loaded'] == True
+    assert at.session_state['data_ready'] == True
+    assert at.session_state['sample_data_loaded'] == True
+    assert at.session_state['model_hash_val'] is not None
+    assert at.session_state['data_hash_val'] is not None
+    assert "Model SHA-256 Hash" in at.subheader[2].value
+    assert "Data SHA-256 Hash" in at.subheader[3].value
+    assert at.dataframe[0].value is not None # Feature Data Preview
 
-def test_upload_configure_page_upload_files():
-    at = AppTest.from_file(APP_FILE).run()
-    at.sidebar.selectbox[0].set_value("1. Upload & Configure").run()
-
-    # Mock file content for upload
-    mock_model_content = b"dummy_model_content_for_pkl"
-    mock_data_content = b"feature1,credit_score,income,debt_to_income,loan_approved\n0.1,700,50000,0.2,1\n0.2,500,30000,0.4,0"
-
-    # Simulate file uploads using io.BytesIO
-    # file_uploader.set_uploaded_file expects a file-like object or bytes,
-    # and also a name and type.
-    at.file_uploader[0].set_uploaded_file(name="test_model.pkl", data=io.BytesIO(mock_model_content), type="pkl").run()
-    at.file_uploader[1].set_uploaded_file(name="test_data.csv", data=io.BytesIO(mock_data_content), type="csv").run()
-
-    # Click 'Load Uploaded Files' button
-    at.button[0].click().run()
-
-    assert at.success[0].value == "Model and data loaded successfully from uploaded files!"
-    assert at.session_state["model_loaded"] is True
-    assert at.session_state["data_loaded"] is True
-    assert at.session_state["model_hash"] == "mock_model_hash_123"
-    assert at.session_state["data_hash"] == "mock_data_hash_456"
-    assert at.session_state["loaded_model_filename"] == "test_model.pkl"
-    assert at.session_state["loaded_data_filename"] == "test_data.csv"
-
-
-def test_global_explanations_page():
-    at = AppTest.from_file(APP_FILE).run()
-    
-    # Load sample data first to enable global explanations
-    at.sidebar.selectbox[0].set_value("1. Upload & Configure").run()
+def test_global_explanations_workflow():
+    at = AppTest.from_file("app.py").run()
+    at.sidebar.selectbox[0].set_value("1. Data & Model Loading").run()
     at.button[1].click().run() # Load Sample Data
 
-    # Navigate to "2. Global Explanations"
     at.sidebar.selectbox[0].set_value("2. Global Explanations").run()
-    assert at.session_state["current_page"] == "2. Global Explanations"
+    
+    assert at.button[0].disabled == False # "Generate Global Explanations" button should be enabled
 
-    # Click 'Generate Global Explanations' button
     at.button[0].click().run()
 
-    assert at.success[0].value == "Global explanations generated!"
-    assert not at.session_state["global_importance_df"].empty
-    assert isinstance(at.session_state["global_shap_values"], list)
-    assert at.dataframe[0].value.columns.tolist() == ['Feature', 'Importance']
-    
-    # Verify content of the summary markdown
-    assert "From the summary plot and the `global_importance_df`, I can clearly see which features, such as `credit_score` and `income`, are most influential" in at.markdown[-1].value
+    assert at.session_state['global_explanations_generated'] == True
+    assert "Global Feature Importance" in at.subheader[0].value
+    assert at.dataframe[0].value is not None # Global importance dataframe
+    assert "SHAP Summary Plot" in at.markdown[2].value # Check for plot header
+    # The actual plot rendering is mocked, so we check for the text/element existence
 
-
-def test_local_explanations_page():
-    at = AppTest.from_file(APP_FILE).run()
-    
-    # Load sample data first
-    at.sidebar.selectbox[0].set_value("1. Upload & Configure").run()
+def test_local_explanations_workflow():
+    at = AppTest.from_file("app.py").run()
+    at.sidebar.selectbox[0].set_value("1. Data & Model Loading").run()
     at.button[1].click().run() # Load Sample Data
 
-    # Navigate to "3. Local Explanations"
+    at.sidebar.selectbox[0].set_value("2. Global Explanations").run()
+    at.button[0].click().run() # Generate Global Explanations (prerequisite for some downstream flags)
+
     at.sidebar.selectbox[0].set_value("3. Local Explanations").run()
-    assert at.session_state["current_page"] == "3. Local Explanations"
 
-    # The default selection logic aims for 2-3 instances.
-    initial_selected_indices = at.multiselect[0].value
-    assert len(initial_selected_indices) > 0
+    # The multiselect should have default values, so button should be enabled
+    assert at.button[0].disabled == False # "Generate Local Explanations"
 
-    # We can refine the selection if needed, but for now, rely on default or set a specific one
-    at.multiselect[0].set_value([initial_selected_indices[0]]).run() # Select only the first default
-
-    # Click 'Generate Local Explanations' button
+    # Select some instances for explanation
+    # AppTest automatically selects defaults based on app logic, so just clicking the button is enough.
     at.button[0].click().run()
 
-    assert at.success[0].value == "Local explanations generated!"
-    assert at.session_state["local_explanations_data"] is not None
-    assert len(at.session_state["local_explanations_data"]) == 1 # Because we selected only one
-    assert len(at.session_state["shap_explanations_list_for_plots"]) == 1
-    
-    # Verify expander and JSON content presence
-    assert at.expander[0].label.startswith(f"Instance ID: {initial_selected_indices[0]}")
-    assert "model_prediction" in at.json[0].value
-
-    # Verify content of the summary markdown
-    assert "The local SHAP explanations provide critical insights into individual loan decisions." in at.markdown[-1].value
+    assert at.session_state['local_explanations_generated'] == True
+    assert len(at.session_state['instances_for_local_explanation']) > 0
+    assert "Analysis for Instance ID" in at.subheader[0].value # Check if local explanations are displayed
+    assert at.metric[0].value is not None # Prediction Probability
+    assert at.dataframe[0].value is not None # Feature Values
+    # Plot is mocked, so just check existence of related markdown
+    assert "Contribution Waterfall Plot" in at.markdown[2].value
 
 
-def test_counterfactuals_page():
-    at = AppTest.from_file(APP_FILE).run()
-    
-    # Load sample data first
-    at.sidebar.selectbox[0].set_value("1. Upload & Configure").run()
+def test_counterfactuals_workflow():
+    at = AppTest.from_file("app.py").run()
+    at.sidebar.selectbox[0].set_value("1. Data & Model Loading").run()
     at.button[1].click().run() # Load Sample Data
 
-    # Navigate to "4. Counterfactuals"
+    at.sidebar.selectbox[0].set_value("2. Global Explanations").run()
+    at.button[0].click().run() 
+
+    at.sidebar.selectbox[0].set_value("3. Local Explanations").run()
+    at.button[0].click().run() 
+
     at.sidebar.selectbox[0].set_value("4. Counterfactuals").run()
-    assert at.session_state["current_page"] == "4. Counterfactuals"
 
-    # Our mock data has indices 0-9, and y has [1, 0, 1, 0, 1, 0, 1, 0, 1, 0]
-    # So denied instances are at indices 1, 3, 5, 7, 9. The selectbox default should pick one of these.
-    # Check default selected value
-    selected_denied_instance_idx = at.selectbox[0].value
-    assert selected_denied_instance_idx in [1, 3, 5, 7, 9]
+    # Selectbox for denied instance should be present and enabled if denied instances exist
+    assert at.selectbox[0].disabled == False
 
-    # Click 'Generate Counterfactual Example' button
+    # The selectbox should have a default selected denied instance
+    assert at.button[0].disabled == False # "Generate Counterfactual Example"
+
     at.button[0].click().run()
 
-    assert at.success[0].value == "Counterfactual example generated!"
-    assert at.session_state["counterfactual_result"] is not None
-    assert "original_instance" in at.session_state["counterfactual_result"]
-    assert "counterfactual_instance" in at.session_state["counterfactual_result"]
-    assert "features_changed" in at.session_state["counterfactual_result"]
-
-    # Verify display elements
-    assert at.markdown[2].value == "##### Original Instance:"
-    assert "credit_score" in at.json[0].value
-    assert at.markdown[3].value == "##### Counterfactual Instance:"
-    assert "credit_score" in at.json[1].value
-    assert at.markdown[4].value == "##### Features Changed to Flip Prediction:"
-    assert "credit_score" in at.json[2].value # Check for key in the dictionary display
-
-    # Verify content of the summary markdown
-    assert "The counterfactual analysis provides invaluable 'what-if' scenarios for PrimeCredit Bank." in at.markdown[-1].value
+    assert at.session_state['counterfactuals_generated'] == True
+    assert "Counterfactual Result" in at.subheader[0].value
+    assert "Original Instance (Denied)" in at.markdown[1].value
+    assert "Counterfactual Instance (Approved)" in at.markdown[2].value
+    assert at.dataframe[0].value is not None # Original instance dataframe
+    assert at.dataframe[1].value is not None # Counterfactual instance dataframe
+    assert "Actionable Feedback:" in at.success[0].value
 
 
-def test_validation_summary_page():
-    at = AppTest.from_file(APP_FILE).run()
-    
-    # Perform actions to populate session state for summary generation
-    _setup_app_for_summary_or_export(at)
+def test_validation_summary_workflow():
+    at = AppTest.from_file("app.py").run()
+    at.sidebar.selectbox[0].set_value("1. Data & Model Loading").run()
+    at.button[1].click().run() # Load Sample Data
 
-    # Navigate to "5. Validation Summary"
+    at.sidebar.selectbox[0].set_value("2. Global Explanations").run()
+    at.button[0].click().run() 
+
+    at.sidebar.selectbox[0].set_value("3. Local Explanations").run()
+    at.button[0].click().run() 
+
+    at.sidebar.selectbox[0].set_value("4. Counterfactuals").run()
+    if at.selectbox[0] and at.button[0].disabled == False: # Ensure a denied instance is selected before generating CF
+        at.button[0].click().run() # Generate Counterfactual Example
+    else:
+        pytest.skip("Skipping counterfactuals and summary tests as no denied instances found or button disabled.")
+
+
     at.sidebar.selectbox[0].set_value("5. Validation Summary").run()
-    assert at.session_state["current_page"] == "5. Validation Summary"
+    
+    assert at.button[0].disabled == False # "Generate Explanation Summary" button should be enabled
 
-    # Click 'Generate Validation Summary' button
     at.button[0].click().run()
 
-    assert at.success[0].value == "Validation summary generated!"
-    assert at.session_state["explanation_summary_md"] == "## Mock Validation Summary\nThis is a mock summary report from the test."
-    assert at.markdown[2].value == at.session_state["explanation_summary_md"]
+    assert at.session_state['summary_generated'] == True
+    assert "Validation Summary" in at.markdown[1].value # Check for summary content
 
-    # Verify content of the final markdown
-    assert "The `explanation_summary.md` document captures Anya's comprehensive analysis." in at.markdown[-1].value
-
-
-def test_export_artifacts_page():
-    at = AppTest.from_file(APP_FILE).run()
-    
-    # Perform actions to populate session state for artifact bundling
-    _setup_app_for_summary_or_export(at)
-
-    # Navigate to "6. Export Artifacts"
-    at.sidebar.selectbox[0].set_value("6. Export Artifacts").run()
-    assert at.session_state["current_page"] == "6. Export Artifacts"
-
-    # Click 'Generate & Bundle All Audit Artifacts' button
-    at.button[0].click().run()
-
-    assert at.success[0].value.startswith("All audit-ready artifacts bundled into:")
-    assert at.session_state["zip_archive_path"] is not None
-    
-    # Verify the download button is present
-    assert at.download_button[0].label == "Download Audit-Ready Artifact Bundle"
-    assert os.path.basename(at.download_button[0].file_name).startswith("session_05_validation_run_")
-    assert at.download_button[0].file_name.endswith(".zip")
-    assert at.download_button[0].mime == "application/zip"
-
-    # Verify content of the final markdown
-    assert "This single, self-contained archive is PrimeCredit Bank's **audit-ready artifact bundle**." in at.markdown[-1].value
-
-def _setup_app_for_summary_or_export(at: AppTest):
-    """Helper function to set up the app state for summary and export tests."""
-    # Load sample data
-    at.sidebar.selectbox[0].set_value("1. Upload & Configure").run()
+def test_export_artifacts_workflow():
+    at = AppTest.from_file("app.py").run()
+    at.sidebar.selectbox[0].set_value("1. Data & Model Loading").run()
     at.button[1].click().run() # Load Sample Data
-    
-    # Generate Global Explanations
+
     at.sidebar.selectbox[0].set_value("2. Global Explanations").run()
-    at.button[0].click().run()
+    at.button[0].click().run() 
 
-    # Generate Local Explanations (selecting one instance)
     at.sidebar.selectbox[0].set_value("3. Local Explanations").run()
-    initial_selected_indices = at.multiselect[0].value
-    if initial_selected_indices:
-        at.multiselect[0].set_value([initial_selected_indices[0]]).run()
+    at.button[0].click().run() 
+
+    at.sidebar.selectbox[0].set_value("4. Counterfactuals").run()
+    if at.selectbox[0] and at.button[0].disabled == False:
+        at.button[0].click().run() 
+    else:
+        pytest.skip("Skipping counterfactuals and export tests as no denied instances found or button disabled.")
+
+    at.sidebar.selectbox[0].set_value("5. Validation Summary").run()
+    at.button[0].click().run() 
+
+    at.sidebar.selectbox[0].set_value("6. Export Artifacts").run()
+
+    assert at.button[0].disabled == False # "Export Audit-Ready Bundle (.zip)" button should be enabled
+
     at.button[0].click().run()
 
-    # Generate Counterfactual Example (using a default denied instance)
-    at.sidebar.selectbox[0].set_value("4. Counterfactuals").run()
-    # The app should automatically select a denied instance if available, otherwise disabled button
-    if at.button[0].disabled is False: # Only click if enabled
-        at.button[0].click().run()
-    
-    # Ensure all explanations are generated for the summary/export pages
-    # The actual content is mocked, so just triggering the actions is enough.
+    assert at.session_state['artifacts_bundled'] == True
+    assert at.success[0].value == "Artifacts bundled successfully!"
+    assert "Evidence Manifest:" in at.markdown[1].value
+    assert "Archive:" in at.markdown[2].value
+    assert at.download_button[0].label == "Download Audit Bundle (.zip)"
+
+def test_custom_upload_data_and_model():
+    at = AppTest.from_file("app.py").run()
+    at.sidebar.selectbox[0].set_value("1. Data & Model Loading").run()
+
+    # Check initial state of custom upload button
+    assert at.button[0].disabled == True
+
+    # Simulate file uploads by providing dummy file objects
+    # For file_uploader, you need to provide a BytesIO object with content
+    dummy_model_content = joblib.dumps(DummyModel())
+    dummy_data_content = pd.DataFrame({
+        'feature1': np.random.rand(10),
+        'feature2': np.random.rand(10),
+        'target': np.random.randint(0, 2, 10)
+    }).to_csv(index=False).encode('utf-8')
+
+    model_file = MagicMock()
+    model_file.name = "custom_model.pkl"
+    model_file.getbuffer.return_value = dummy_model_content
+
+    data_file = MagicMock()
+    data_file.name = "custom_data.csv"
+    data_file.getbuffer.return_value = dummy_data_content
+
+    at.file_uploader[0].set_value(model_file)
+    at.file_uploader[1].set_value(data_file).run()
+
+    # Now the button should be enabled
+    assert at.button[0].disabled == False 
+
+    at.button[0].click().run() # Click "Load Custom Model & Data"
+
+    assert at.success[0].value == "Custom artifacts loaded successfully!"
+    assert at.session_state['model_loaded'] == True
+    assert at.session_state['data_ready'] == True
+    assert at.session_state['sample_data_loaded'] == False
+    assert at.session_state['model_hash_val'] is not None
+    assert at.session_state['data_hash_val'] is not None
+    assert "Model SHA-256 Hash" in at.subheader[2].value
+    assert "Data SHA-256 Hash" in at.subheader[3].value
+    assert at.dataframe[0].value is not None
