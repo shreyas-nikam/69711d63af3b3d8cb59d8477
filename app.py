@@ -687,7 +687,7 @@ def sidebar_controls(models: Dict[str, Any]):
     # Sidebar (starter)
     st.sidebar.image(
         "https://www.quantuniversity.com/assets/img/logo5.jpg",
-        use_container_width=True
+        width='stretch'
     )
     st.sidebar.divider()
 
@@ -713,11 +713,11 @@ def sidebar_controls(models: Dict[str, Any]):
 
     st.session_state.seed = 42
 
-    st.sidebar.selectbox(
-        "Risk tier",
-        ["Tier 1 (High)", "Tier 2 (Moderate)", "Tier 3 (Low)"],
-        key="risk_tier",
-    )
+    # st.sidebar.selectbox(
+    #     "Risk tier",
+    #     ["Tier 1 (High)", "Tier 2 (Moderate)", "Tier 3 (Low)"],
+    #     key="risk_tier",
+    # )
     st.sidebar.selectbox("Baseline model", list(
         models.keys()), key="model_name")
     st.sidebar.slider(
@@ -744,28 +744,15 @@ This Streamlit application operationalizes **model interpretability as an enterp
 
 You will walk through an *audit-style* workflow: choose a baseline model, generate global and local explanations,
 run a basic counterfactual, and export an evidence bundle that is:
-- tied to a specific **model version**,
-- reproducible with a fixed **seed**,
-- backed by a **SHA-256 evidence manifest**.
+- Tied to a specific **model version**,
+- Reproducible with a fixed **seed**,
+- Backed by a **SHA-256 evidence manifest**.
 
 > **Enterprise question:** *Can this model’s decisions be explained to auditors, regulators, and internal stakeholders in a reproducible and defensible way?*
 """
     )
     st.info(
         "Use the sidebar navigation to follow the persona-driven story arc end-to-end.")
-
-    st.markdown("### What you’ll produce in the export bundle")
-    st.markdown(
-        """
-- `global_explanation.json`
-- `local_explanation.json`
-- `counterfactual_example.json` (if generated)
-- `explanation_summary.md`
-- `config_snapshot.json`
-- `evidence_manifest.json`
-- `Session_05_<run_id>.zip`
-"""
-    )
 
     st.markdown("### Quick start checklist")
     st.markdown(
@@ -819,7 +806,7 @@ Explain *one* decision with local explanations (SHAP + LIME), using consistent l
 Generate a basic counterfactual: “what minimal change flips the decision?”
 
 **Scene E — Audit bundle:**  
-Export all artifacts, with SHA-256 hashes, into `reports/session05/<run_id>/`.
+Export all artifacts, with SHA-256 hashes.
 
 > This transforms interpretability from “pretty charts” into **enterprise control evidence**.
 """
@@ -851,7 +838,7 @@ Decision rule used throughout the app:
     with col1:
         st.subheader("Dataset preview")
         st.dataframe(pd.concat([X.head(20), y.head(20)],
-                     axis=1), use_container_width=True)
+                     axis=1), width='stretch')
         st.caption(
             f"Rows: {len(X):,} • Features: {X.shape[1]} • Dataset SHA-256 is computed at export time.")
     with col2:
@@ -874,7 +861,7 @@ Decision rule used throughout the app:
                          columns=["Predicted: No Default",
                                   "Predicted: Default"],
                          index=["Actual: No Default", "Actual: Default"])
-    st.dataframe(cm_df, use_container_width=True)
+    st.dataframe(cm_df, width='stretch')
 
     st.markdown("""
     **📊 Understanding the Confusion Matrix:**
@@ -898,7 +885,7 @@ Decision rule used throughout the app:
                     "F1-Score": f"{values.get('f1-score', 0):.3f}",
                     "Support": int(values.get('support', 0))
                 })
-        st.dataframe(pd.DataFrame(report_data), use_container_width=True)
+        st.dataframe(pd.DataFrame(report_data), width='stretch')
 
         st.markdown("""
         **📊 Understanding the Classification Report:**
@@ -935,7 +922,7 @@ In this lab:
             m, X_bg=X_bg, X_sample=X_sample, family=fam)
         st.success(f"Method used: **SHAP ({meta['explainer']})**")
         st.caption(f"Sample size: {len(X_sample)}")
-        st.dataframe(imp_df.head(15), use_container_width=True)
+        st.dataframe(imp_df.head(15), width='stretch')
         fig = shap_summary_plot(imp_df.head(
             15), title="Mean |SHAP| feature importance (top 15)")
         st.pyplot(fig, clear_figure=True)
@@ -955,7 +942,7 @@ In this lab:
             m, X_sample, y.loc[X_sample.index], seed=ctx.seed, n_repeats=7)
         st.warning(
             "Using fallback: **Permutation importance** (expected for black-box models or when SHAP is missing).")
-        st.dataframe(imp_df.head(15), use_container_width=True)
+        st.dataframe(imp_df.head(15), width='stretch')
 
         st.markdown("""
         **📊 Understanding Permutation Importance:**
@@ -1001,7 +988,7 @@ Here we re-run the global importance computation several times and measure rank 
         rank_df["rank_std"] = rank_df.std(axis=1)
         rank_df = rank_df.sort_values("rank_std").reset_index().rename(
             columns={"index": "feature"})
-        st.dataframe(rank_df.head(20), use_container_width=True)
+        st.dataframe(rank_df.head(20), width='stretch')
         st.caption("Lower rank_std indicates higher stability.")
 
 
@@ -1040,13 +1027,13 @@ Note: In this app, SHAP local explanations are enabled for the **tree** and **li
 
     st.markdown("#### Applicant features")
     st.dataframe(x_row.T.rename(
-        columns={x_row.index[0]: "value"}), use_container_width=True)
+        columns={x_row.index[0]: "value"}), width='stretch')
 
     X_bg = X.sample(n=min(500, len(X)), random_state=ctx.seed)
     local_df, meta = compute_shap_local(m, X_bg=X_bg, x_row=x_row, family=fam)
 
     st.markdown("#### Top contributors (SHAP)")
-    st.dataframe(local_df.head(12), use_container_width=True)
+    st.dataframe(local_df.head(12), width='stretch')
 
     fig = shap_local_waterfall_plot(
         local_df=local_df.head(12),
@@ -1060,10 +1047,10 @@ Note: In this app, SHAP local explanations are enabled for the **tree** and **li
 #### 📊 Understanding Local SHAP Explanations
 
 **How to read this (auditor-friendly):**
-- **Base value** ({:.3f}): Model's average prediction across all cases (starting point)
+- **Base value**: Model's average prediction across all cases (starting point)
 - **Positive contribution** (+): Increases predicted default risk → pushes toward DENY
 - **Negative contribution** (−): Decreases predicted default risk → pushes toward APPROVE
-- **Final prediction**: Base value + sum of all contributions = {:.3f}
+- **Final prediction**: Base value + sum of all contributions
 - **Waterfall plot**: Shows cumulative effect as each feature is added
 
 💡 **Validation insight**: Check if top contributors align with business logic. For example:
@@ -1122,9 +1109,9 @@ Why it matters in an enterprise workbench:
         st.markdown("#### Explanation (list form)")
         lime_df = pd.DataFrame(lime_obj["as_list"], columns=[
             "condition", "weight"]).sort_values("weight", ascending=False)
-        st.dataframe(lime_df, use_container_width=True)
+        st.dataframe(lime_df, width='stretch')
 
-        st.markdown("#### Explanation (HTML)")
+        st.markdown("#### Explanation")
         st.components.v1.html(lime_obj["as_html"], height=500, scrolling=True)
 
         st.markdown("""
@@ -1218,7 +1205,7 @@ It prefers “risk-reducing” directions (e.g., increase credit score, decrease
                   "Change": f"{v['to'] - v['from']:.2f}"}
                     for k, v in cf["changes"].items()]
             )
-            st.dataframe(changes_df, use_container_width=True)
+            st.dataframe(changes_df, width='stretch')
         else:
             st.info("No feature changes needed or found.")
 
@@ -1226,7 +1213,7 @@ It prefers “risk-reducing” directions (e.g., increase credit score, decrease
         with st.expander("View complete counterfactual profile"):
             cf_df = pd.DataFrame([cf["counterfactual_row"]])
             st.dataframe(cf_df.T.rename(
-                columns={0: "value"}), use_container_width=True)
+                columns={0: "value"}), width='stretch')
 
         st.markdown("""
         **📊 Understanding Counterfactual Explanations:**
@@ -1291,7 +1278,7 @@ This page previews:
         {"Configuration Item": k, "Value": str(v)}
         for k, v in config_preview.items()
     ])
-    st.dataframe(config_df, use_container_width=True)
+    st.dataframe(config_df, width='stretch')
 
     with st.expander("View as JSON"):
         st.code(pretty_json(config_preview), language="json")
