@@ -1421,9 +1421,8 @@ Tip: Use the helper buttons below to populate artifacts into the session for exp
                 st.error(f"Counterfactual artifact failed: {e}")
 
     st.divider()
-    notes_md = st.text_area(
-        "Explanation summary (saved as explanation_summary.md)",
-        value=f"""# Lab 5 — Explanation Summary
+    # Use session_state to persist notes_md
+    default_notes = f"""# Lab 5 — Explanation Summary
 
 **Persona:** {PERSONA_NAME} ({PERSONA_ROLE})
 **Organization:** {ORG_NAME}
@@ -1440,9 +1439,13 @@ Tip: Use the helper buttons below to populate artifacts into the session for exp
 - Any surprising drivers:
 - Stability concerns:
 - Recommended follow-ups:
-""",
+"""
+    if "notes_md" not in st.session_state:
+        st.session_state["notes_md"] = default_notes
+    notes_md = st.text_area(
+        "Explanation summary (saved as explanation_summary.md)",
+        value=st.session_state["notes_md"],
         height=260,
-        disabled=True
     )
 
     if st.button("📦 Export evidence bundle"):
