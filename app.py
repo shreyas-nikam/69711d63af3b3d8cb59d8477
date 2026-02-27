@@ -110,7 +110,7 @@ def pretty_json(obj: Any) -> str:
 def model_family(model: Any) -> str:
     """Coarse model family for method selection logic."""
     if isinstance(model, RandomForestClassifier):
-        return "tree"
+        return "blackbox"
     if isinstance(model, LogisticRegression):
         return "linear"
     # Fallback heuristic for other sklearn estimators
@@ -1442,6 +1442,7 @@ Tip: Use the helper buttons below to populate artifacts into the session for exp
 - Recommended follow-ups:
 """,
         height=260,
+        disabled=True
     )
 
     if st.button("📦 Export evidence bundle"):
