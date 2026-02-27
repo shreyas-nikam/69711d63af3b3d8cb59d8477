@@ -708,10 +708,12 @@ def sidebar_controls(models: Dict[str, Any]):
         key="page_select",
     )
 
-    st.session_state["run_id"] = _random_run_id("session05")
-    st.session_state["created_utc"] = _utc_now_iso()
-
-    st.session_state.seed = 42
+    if "run_id" not in st.session_state:
+        st.session_state["run_id"] = _random_run_id("session05")
+    if "created_utc" not in st.session_state:
+        st.session_state["created_utc"] = _utc_now_iso()
+    if "seed" not in st.session_state:
+        st.session_state["seed"] = 42
 
     # st.sidebar.selectbox(
     #     "Risk tier",
